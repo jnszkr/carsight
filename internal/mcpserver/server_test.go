@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"math"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/jnszkr/carsight/internal/car"
 	"github.com/jnszkr/carsight/internal/obd"
 	"github.com/jnszkr/carsight/internal/store"
 )
@@ -68,7 +70,9 @@ func connect(t *testing.T, db *store.Store) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	ct, st := mcp.NewInMemoryTransports()
-	if _, err := New(db, "test").Connect(ctx, st, nil); err != nil {
+	srv := New(db, Config{Version: "test", Adapter: car.Adapter{Port: "sim:volvo", SimSpeedup: 30}})
+	t.Cleanup(srv.Close)
+	if _, err := srv.MCP.Connect(ctx, st, nil); err != nil {
 		t.Fatal(err)
 	}
 	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil).Connect(ctx, ct, nil)
@@ -106,14 +110,19 @@ func TestTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	var names []string
+	writes := map[string]bool{"start_drive": true, "stop_drive": true, "label_drive": true, "clear_dtcs": true}
 	for _, tool := range tools.Tools {
 		names = append(names, tool.Name)
-		if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
-			t.Errorf("%s is not marked read-only", tool.Name)
+		if ro := tool.Annotations != nil && tool.Annotations.ReadOnlyHint; ro == writes[tool.Name] {
+			t.Errorf("%s: read-only %v", tool.Name, ro)
 		}
 	}
-	if len(names) != 7 {
+	if len(names) != 13 {
 		t.Errorf("tools: %v", names)
+	}
+	clear := tools.Tools[slices.IndexFunc(tools.Tools, func(t *mcp.Tool) bool { return t.Name == "clear_dtcs" })]
+	if d := clear.Annotations.DestructiveHint; d == nil || !*d {
+		t.Error("clear_dtcs is not marked destructive")
 	}
 
 	var vs struct{ Vehicles []store.Vehicle }
@@ -212,5 +221,126 @@ func TestPrompts(t *testing.T) {
 	}
 	if _, err := cs.GetPrompt(ctx, &mcp.GetPromptParams{Name: "analyze_trends"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func callErr(t *testing.T, cs *mcp.ClientSession, name string, args map[string]any) string {
+	t.Helper()
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		t.Fatalf("%s: %v", name, err)
+	}
+	if !res.IsError {
+		t.Fatalf("%s: expected a tool error", name)
+	}
+	return res.Content[0].(*mcp.TextContent).Text
+}
+
+func TestDriveTools(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	cs := connect(t, db)
+
+	var sc car.Scan
+	call(t, cs, "scan_car", nil, &sc)
+	if sc.VIN == "" || len(sc.LoggedPIDs) == 0 || sc.Readiness == nil {
+		t.Errorf("scan: %+v", sc)
+	}
+	if callErr(t, cs, "stop_drive", nil) == "" {
+		t.Error("stop_drive with nothing running")
+	}
+
+	var st car.Status
+	call(t, cs, "start_drive", map[string]any{"drive_type": "Cold start", "notes": "test", "vehicle_name": "Volvo V70"}, &st)
+	if st.SessionID == 0 || !st.Running || st.DriveType != "cold_start" {
+		t.Fatalf("start: %+v", st)
+	}
+	if msg := callErr(t, cs, "scan_car", nil); !strings.Contains(msg, "drive is being logged") {
+		t.Errorf("scan while driving: %s", msg)
+	}
+	callErr(t, cs, "start_drive", nil)
+	callErr(t, cs, "clear_dtcs", map[string]any{"confirm": true})
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		call(t, cs, "drive_status", nil, &st)
+		if st.Latest["rpm"] > 0 && st.Samples > 50 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if st.Samples <= 50 || st.Latest["rpm"] == 0 {
+		t.Fatalf("status: %+v", st)
+	}
+
+	call(t, cs, "stop_drive", nil, &st)
+	if st.Running || st.StopReason != "stopped" {
+		t.Errorf("stop: %+v", st)
+	}
+	var drive struct {
+		Drive struct {
+			SessionID   int64  `json:"session_id"`
+			DriveType   string `json:"drive_type"`
+			Vehicle     string `json:"vehicle"`
+			SampleCount int    `json:"sample_count"`
+		}
+	}
+	call(t, cs, "get_drive_summary", nil, &drive)
+	if drive.Drive.SessionID != st.SessionID || drive.Drive.DriveType != "cold_start" || drive.Drive.Vehicle != "Volvo V70" {
+		t.Errorf("summary: %+v", drive)
+	}
+
+	call(t, cs, "label_drive", map[string]any{"session_id": st.SessionID, "drive_type": "idle test"}, nil)
+	var ss listSessionsOut
+	call(t, cs, "list_sessions", map[string]any{"drive_type": "idle_test"}, &ss)
+	if len(ss.Sessions) != 1 || ss.Sessions[0].Notes != "test" || ss.Sessions[0].Running {
+		t.Errorf("sessions: %+v", ss)
+	}
+	call(t, cs, "list_sessions", map[string]any{"drive_type": "highway"}, &ss)
+	if len(ss.Sessions) != 0 {
+		t.Errorf("highway sessions: %+v", ss)
+	}
+
+	// A timed drive stops by itself.
+	call(t, cs, "start_drive", map[string]any{"duration_min": 0.01}, &st)
+	time.Sleep(1500 * time.Millisecond)
+	call(t, cs, "drive_status", nil, &st)
+	if st.Running || st.StopReason != "duration reached" {
+		t.Errorf("timed drive: %+v", st)
+	}
+
+	callErr(t, cs, "clear_dtcs", nil)
+	call(t, cs, "clear_dtcs", map[string]any{"confirm": true}, nil)
+}
+
+func TestCloseSavesDrive(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	srv := New(db, Config{Adapter: car.Adapter{Port: "sim:citroen"}})
+	ct, st := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	if _, err := srv.MCP.Connect(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call(t, cs, "start_drive", nil, nil)
+	time.Sleep(500 * time.Millisecond)
+	cs.Close()
+	srv.Close()
+	ss, err := db.Sessions(ctx, "", time.Time{}, time.Time{})
+	if err != nil || len(ss) != 1 || ss[0].EndedAt.IsZero() {
+		t.Fatalf("sessions: %+v %v", ss, err)
+	}
+	if n, _ := db.Samples(ctx, ss[0].ID); len(n) == 0 {
+		t.Error("no samples saved")
 	}
 }

@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 	ended_at   INTEGER,
 	protocol   TEXT NOT NULL DEFAULT '',
 	readiness  TEXT NOT NULL DEFAULT '',
-	notes      TEXT NOT NULL DEFAULT ''
+	notes      TEXT NOT NULL DEFAULT '',
+	drive_type TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS sessions_vin ON sessions(vin, started_at);
 CREATE TABLE IF NOT EXISTS samples (
@@ -65,6 +66,7 @@ type Session struct {
 	EndedAt   time.Time // zero while logging
 	Protocol  string
 	Readiness string // JSON-encoded obd.Readiness
+	DriveType string // e.g. "commute", "highway"
 	Notes     string
 }
 
@@ -89,11 +91,28 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema); err != nil {
+	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("store: migrate: %w", err)
 	}
 	return &Store{db: db}, nil
+}
+
+// migrate creates the schema and adds columns that databases created by
+// older versions lack.
+func migrate(db *sql.DB) error {
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('sessions') WHERE name = 'drive_type'`).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		_, err := db.Exec(`ALTER TABLE sessions ADD COLUMN drive_type TEXT NOT NULL DEFAULT ''`)
+		return err
+	}
+	return nil
 }
 
 // Close closes the database.
@@ -161,10 +180,16 @@ func (s *Store) SetReadiness(ctx context.Context, id int64, readinessJSON string
 	return err
 }
 
-// SetNotes stores free-form notes for a session (e.g. "cold start, commute").
-func (s *Store) SetNotes(ctx context.Context, id int64, notes string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET notes = ? WHERE id = ?`, notes, id)
-	return err
+// Describe sets a session's drive type (e.g. "commute") and free-form notes.
+func (s *Store) Describe(ctx context.Context, id int64, driveType, notes string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE sessions SET drive_type = ?, notes = ? WHERE id = ?`, driveType, notes, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // AddSamples inserts samples in a single transaction.
@@ -201,13 +226,13 @@ func (s *Store) AddDTCs(ctx context.Context, id int64, kind string, codes []stri
 	return nil
 }
 
-const sessionCols = `id, vin, started_at, ended_at, protocol, readiness, notes`
+const sessionCols = `id, vin, started_at, ended_at, protocol, readiness, drive_type, notes`
 
 func scanSession(sc interface{ Scan(...any) error }) (Session, error) {
 	var ss Session
 	var start int64
 	var end sql.NullInt64
-	if err := sc.Scan(&ss.ID, &ss.VIN, &start, &end, &ss.Protocol, &ss.Readiness, &ss.Notes); err != nil {
+	if err := sc.Scan(&ss.ID, &ss.VIN, &start, &end, &ss.Protocol, &ss.Readiness, &ss.DriveType, &ss.Notes); err != nil {
 		return ss, err
 	}
 	ss.StartedAt = time.UnixMilli(start)

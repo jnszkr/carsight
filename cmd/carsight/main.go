@@ -24,9 +24,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/jnszkr/carsight/internal/analyze"
-	"github.com/jnszkr/carsight/internal/elm327"
+	"github.com/jnszkr/carsight/internal/car"
 	"github.com/jnszkr/carsight/internal/mcpserver"
-	"github.com/jnszkr/carsight/internal/obd"
 	"github.com/jnszkr/carsight/internal/store"
 )
 
@@ -45,7 +44,8 @@ Data commands:
   report      Markdown report for one drive (default: latest)
   trend       Markdown trend report across drives
   summary     drive summary as JSON
-  mcp         serve the database to an AI assistant over MCP (stdio)
+  mcp         serve carsight to an AI assistant over MCP (stdio): analysis,
+              raw data, and starting/stopping drives
 
 Run 'carsight <command> -h' for the command's flags.
 `
@@ -115,96 +115,98 @@ func newFlags(name, args string) (*flag.FlagSet, *string) {
 	return fs, fs.String("db", defaultDB(), "SQLite database path (env CARSIGHT_DB)")
 }
 
+// adapterFlags adds the flags that select the adapter.
+func adapterFlags(fs *flag.FlagSet) *car.Adapter {
+	a := &car.Adapter{}
+	fs.StringVar(&a.Port, "port", "auto", "serial device, 'auto', or 'sim:volvo' / 'sim:citroen' for the simulator")
+	fs.IntVar(&a.Baud, "baud", 0, "baud rate (0 = auto-detect)")
+	fs.Float64Var(&a.SimSpeedup, "sim-speedup", 1, "simulator: run simulated time this many times faster")
+	return a
+}
+
 func carCommand(ctx context.Context, cmd string, args []string) error {
 	fs, dbPath := newFlags(cmd, "")
-	port := fs.String("port", "auto", "serial device, 'auto', or 'sim:volvo' / 'sim:citroen' for the simulator")
-	baud := fs.Int("baud", 0, "baud rate (0 = auto-detect)")
-	simSpeedup := fs.Float64("sim-speedup", 1, "simulator: run simulated time this many times faster")
-	var name, notes *string
-	var slowEvery *int
-	var duration *time.Duration
+	adapter := adapterFlags(fs)
+	var opts car.DriveOptions
 	var yes *bool
 	switch cmd {
 	case "log":
-		name = fs.String("name", "", "friendly vehicle name, e.g. 'Volvo V70'")
-		notes = fs.String("notes", "", "notes for this session, e.g. 'cold start, commute'")
-		slowEvery = fs.Int("slow-every", 5, "poll slow PIDs (temperatures, voltage, LTFT) every N cycles")
-		duration = fs.Duration("duration", 0, "stop logging after this long (0 = until Ctrl-C)")
+		fs.StringVar(&opts.Name, "name", "", "friendly vehicle name, e.g. 'Volvo V70'")
+		fs.StringVar(&opts.DriveType, "type", "", "drive type: "+strings.Join(slices.Sorted(maps.Keys(car.DriveTypes)), ", ")+" (or your own)")
+		fs.StringVar(&opts.Notes, "notes", "", "notes for this session, e.g. 'rough idle after refuelling'")
+		fs.IntVar(&opts.SlowEvery, "slow-every", 5, "poll slow PIDs (temperatures, voltage, LTFT) every N cycles")
+		fs.DurationVar(&opts.Duration, "duration", 0, "stop logging after this long (0 = until Ctrl-C)")
 	case "clear-dtcs":
 		yes = fs.Bool("yes", false, "don't ask for confirmation")
 	}
 	fs.Parse(args)
 
-	rw, desc, err := openAdapter(*port, *baud, *simSpeedup)
+	c, err := car.Connect(ctx, *adapter)
 	if err != nil {
 		return err
 	}
-	defer rw.Close()
-	conn := elm327.New(rw)
-	if err := conn.Init(ctx); err != nil {
-		return fmt.Errorf("initialise adapter on %s: %w", desc, err)
-	}
-	log.Printf("connected: %s, %s, %s", desc, conn.Version, conn.Protocol)
-	client := &obd.Client{R: conn, CAN: conn.Protocol.IsCAN()}
+	log.Printf("connected: %s, %s, %s", c.Desc, c.Conn.Version, c.Protocol())
 
 	switch cmd {
 	case "scan":
-		return scan(ctx, client)
+		defer c.Close()
+		return scan(ctx, c)
 	case "clear-dtcs":
-		return clearDTCs(ctx, client, *yes)
+		defer c.Close()
+		return clearDTCs(ctx, c, *yes)
 	default:
 		db, err := openDB(*dbPath)
 		if err != nil {
+			c.Close()
 			return err
 		}
 		defer db.Close()
-		return logDrive(ctx, client, db, conn.Protocol.String(), *name, *notes, *slowEvery, *duration)
+		opts.Logf = log.Printf
+		d, err := car.StartDrive(ctx, c, db, opts)
+		if err != nil {
+			return err
+		}
+		log.Print("logging; press Ctrl-C to stop")
+		<-d.Done()
+		fmt.Println(d.Status().SessionID)
+		return nil
 	}
 }
 
-func scan(ctx context.Context, c *obd.Client) error {
-	vin, err := c.VIN(ctx)
-	if err != nil {
-		fmt.Printf("VIN: unavailable (%v)\n", err)
+func scan(ctx context.Context, c *car.Car) error {
+	s, err := c.Scan(ctx)
+	if s.VIN != "" {
+		fmt.Printf("VIN: %s\n", s.VIN)
 	} else {
-		fmt.Printf("VIN: %s\n", vin)
+		fmt.Printf("VIN: unavailable (%s)\n", s.VINError)
 	}
-	sup, err := c.SupportedPIDs(ctx)
 	if err != nil {
-		return fmt.Errorf("supported PIDs: %w", err)
+		return err
 	}
 	fmt.Println("\nLogged PIDs:")
-	for _, p := range obd.Default {
+	for _, p := range s.LoggedPIDs {
 		mark := "no "
-		if sup[p.Code] {
+		if p.Supported {
 			mark = "yes"
 		}
-		fmt.Printf("  %s  %02X %-16s %s\n", mark, p.Code, p.Name, p.Desc)
+		fmt.Printf("  %s  %s %-16s %s\n", mark, p.PID[2:], p.Name, p.Desc)
 	}
-	var all []string
-	for code := 1; code < 0xE0; code++ {
-		if sup[byte(code)] && code%0x20 != 0 {
-			all = append(all, fmt.Sprintf("%02X", code))
-		}
+	fmt.Printf("\nAll supported mode 01 PIDs: %s\n", strings.Join(s.AllPIDs, " "))
+	for _, e := range s.DTCErrors {
+		fmt.Printf("\nDTC read error: %s\n", e)
 	}
-	fmt.Printf("\nAll supported mode 01 PIDs: %s\n", strings.Join(all, " "))
-
-	for _, pending := range []bool{false, true} {
-		kind := "Stored"
-		if pending {
-			kind = "Pending"
-		}
-		codes, err := c.DTCs(ctx, pending)
-		switch {
-		case err != nil:
-			fmt.Printf("\n%s DTCs: error: %v\n", kind, err)
-		case len(codes) == 0:
+	for _, kc := range []struct {
+		kind  string
+		codes []string
+	}{{"Stored", s.StoredDTCs}, {"Pending", s.PendingDTCs}} {
+		kind, codes := kc.kind, kc.codes
+		if len(codes) == 0 {
 			fmt.Printf("\n%s DTCs: none\n", kind)
-		default:
+		} else {
 			fmt.Printf("\n%s DTCs: %s\n", kind, strings.Join(codes, ", "))
 		}
 	}
-	if r, err := c.ReadReadiness(ctx); err == nil {
+	if r := s.Readiness; r != nil {
 		fmt.Printf("\nMIL: %v, DTC count: %d\nMonitors:\n", r.MIL, r.DTCCount)
 		for _, k := range slices.Sorted(maps.Keys(r.Monitors)) {
 			fmt.Printf("  %-18s %s\n", k, r.Monitors[k])
@@ -213,8 +215,8 @@ func scan(ctx context.Context, c *obd.Client) error {
 	return nil
 }
 
-func clearDTCs(ctx context.Context, c *obd.Client, yes bool) error {
-	codes, err := c.DTCs(ctx, false)
+func clearDTCs(ctx context.Context, c *car.Car, yes bool) error {
+	codes, err := c.Client.DTCs(ctx, false)
 	if err != nil {
 		return err
 	}
@@ -227,143 +229,10 @@ func clearDTCs(ctx context.Context, c *obd.Client, yes bool) error {
 			return errors.New("aborted")
 		}
 	}
-	if err := c.ClearDTCs(ctx); err != nil {
+	if _, err := c.ClearDTCs(ctx); err != nil {
 		return err
 	}
 	fmt.Println("DTCs cleared.")
-	return nil
-}
-
-func logDrive(ctx context.Context, c *obd.Client, db *store.Store, protocol, name, notes string, slowEvery int, duration time.Duration) error {
-	vin, err := c.VIN(ctx)
-	if err != nil {
-		// Some older ECUs don't support mode 09; fall back to a stable placeholder.
-		log.Printf("VIN unavailable (%v); logging under UNKNOWN", err)
-		vin = "UNKNOWN"
-	}
-	if err := db.UpsertVehicle(ctx, store.Vehicle{VIN: vin, Name: name, Protocol: protocol}); err != nil {
-		return err
-	}
-	sup, err := c.SupportedPIDs(ctx)
-	if err != nil {
-		return fmt.Errorf("supported PIDs: %w", err)
-	}
-	pids := obd.Filter(obd.Default, sup)
-	if len(pids) == 0 {
-		return errors.New("car supports none of the logged PIDs")
-	}
-	var fast, slow []obd.PID
-	var names []string
-	for _, p := range pids {
-		names = append(names, p.Name)
-		if p.Slow {
-			slow = append(slow, p)
-		} else {
-			fast = append(fast, p)
-		}
-	}
-
-	start := time.Now()
-	id, err := db.StartSession(ctx, vin, protocol, start)
-	if err != nil {
-		return err
-	}
-	if notes != "" {
-		_ = db.SetNotes(ctx, id, notes)
-	}
-	log.Printf("session %d for %s: logging %s", id, vin, strings.Join(names, ", "))
-
-	// Once-per-session data. DTCs are read again at the end in case
-	// something set during the drive.
-	readDTCs := func(ctx context.Context) {
-		for _, pending := range []bool{false, true} {
-			kind := map[bool]string{false: "stored", true: "pending"}[pending]
-			codes, err := c.DTCs(ctx, pending)
-			if err != nil {
-				log.Printf("read %s DTCs: %v", kind, err)
-				continue
-			}
-			if len(codes) > 0 {
-				log.Printf("%s DTCs: %s", kind, strings.Join(codes, ", "))
-			}
-			_ = db.AddDTCs(ctx, id, kind, codes, time.Now())
-		}
-	}
-	readDTCs(ctx)
-	if r, err := c.ReadReadiness(ctx); err == nil {
-		b, _ := json.Marshal(r)
-		_ = db.SetReadiness(ctx, id, string(b))
-	}
-
-	if duration > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, duration)
-		defer cancel()
-	}
-	log.Print("logging; press Ctrl-C to stop")
-
-	var buf []store.Sample
-	var total, cycles, errs int
-	lastFlush, lastStatus := time.Now(), time.Now()
-	flush := func(ctx context.Context) {
-		if err := db.AddSamples(ctx, id, buf); err != nil {
-			log.Printf("write samples: %v", err)
-		}
-		total += len(buf)
-		buf = buf[:0]
-	}
-	poll := func(p obd.PID) bool {
-		v, err := c.Read(ctx, p)
-		if ctx.Err() != nil {
-			return false
-		}
-		if err != nil {
-			errs++
-			if errors.Is(err, elm327.ErrUnableConnect) {
-				log.Printf("lost connection to the car: %v", err)
-				return false
-			}
-			return true
-		}
-		buf = append(buf, store.Sample{T: time.Now(), PID: p.Name, Value: v})
-		return true
-	}
-loop:
-	for {
-		group := fast
-		if cycles%max(slowEvery, 1) == 0 {
-			group = append(append([]obd.PID{}, fast...), slow...)
-		}
-		for _, p := range group {
-			if !poll(p) {
-				break loop
-			}
-		}
-		cycles++
-		if time.Since(lastFlush) > 2*time.Second {
-			flush(ctx)
-			lastFlush = time.Now()
-		}
-		if time.Since(lastStatus) > 30*time.Second {
-			el := time.Since(start).Seconds()
-			log.Printf("%s: %d samples, %.1f cycles/s, %d errors", time.Since(start).Round(time.Second), total+len(buf), float64(cycles)/el, errs)
-			lastStatus = time.Now()
-		}
-	}
-
-	// The run context is done; finish up with a fresh one.
-	end := time.Now()
-	fin, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	flush(fin)
-	readDTCs(fin)
-	if err := db.EndSession(fin, id, end); err != nil {
-		return err
-	}
-	el := end.Sub(start).Seconds()
-	log.Printf("session %d done: %s, %d samples, %.1f cycles/s (fast group), %d read errors",
-		id, end.Sub(start).Round(time.Second), total, float64(cycles)/el, errs)
-	fmt.Println(id)
 	return nil
 }
 
@@ -395,7 +264,7 @@ func sessionsCmd(ctx context.Context, args []string) error {
 			if !s.EndedAt.IsZero() {
 				dur = s.EndedAt.Sub(s.StartedAt).Round(time.Second).String()
 			}
-			fmt.Printf("  #%-5d %s  %-10s %s\n", s.ID, s.StartedAt.Local().Format("2006-01-02 15:04"), dur, s.Notes)
+			fmt.Printf("  #%-5d %s  %-10s %-11s %s\n", s.ID, s.StartedAt.Local().Format("2006-01-02 15:04"), dur, s.DriveType, s.Notes)
 		}
 	}
 	return nil
@@ -470,6 +339,7 @@ func trendCmd(ctx context.Context, args []string) error {
 	since := fs.String("since", "", "first day to include (YYYY-MM-DD)")
 	until := fs.String("until", "", "last day to include (YYYY-MM-DD)")
 	minDur := fs.Duration("min-duration", 5*time.Minute, "ignore drives shorter than this")
+	driveType := fs.String("type", "", "only drives of this type, e.g. commute")
 	out := fs.String("o", "-", "output file ('-' for stdout)")
 	fs.Parse(args)
 
@@ -496,7 +366,8 @@ func trendCmd(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	t, err := analyze.AnalyzeTrends(ctx, db, *vin, s, u, *minDur)
+	t, err := analyze.AnalyzeTrends(ctx, db, analyze.TrendFilter{VIN: *vin, Since: s, Until: u, MinDuration: *minDur,
+		DriveType: car.NormalizeDriveType(*driveType)})
 	if err != nil {
 		return err
 	}
@@ -512,14 +383,18 @@ func trendCmd(ctx context.Context, args []string) error {
 
 func mcpCmd(ctx context.Context, args []string) error {
 	fs, dbPath := newFlags("mcp", "")
+	adapter := adapterFlags(fs)
 	fs.Parse(args)
 	db, err := openDB(*dbPath)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
+	srv := mcpserver.New(db, mcpserver.Config{Version: version(), Adapter: *adapter})
+	// Ending the session (the client exits) stops and saves a drive in progress.
+	defer srv.Close()
 	// stdout carries the protocol; logs go to stderr.
-	return mcpserver.New(db, version()).Run(ctx, &mcp.StdioTransport{})
+	return srv.MCP.Run(ctx, &mcp.StdioTransport{})
 }
 
 func version() string {

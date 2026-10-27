@@ -35,6 +35,7 @@ type Summary struct {
 	VIN         string             `json:"vin"`
 	Vehicle     string             `json:"vehicle,omitempty"`
 	Protocol    string             `json:"protocol,omitempty"`
+	DriveType   string             `json:"drive_type,omitempty"`
 	Notes       string             `json:"notes,omitempty"`
 	Start       time.Time          `json:"start"`
 	Duration    Duration           `json:"duration"`
@@ -105,7 +106,7 @@ type DTCEntry struct {
 // Summarize computes the summary of a session.
 func Summarize(sess store.Session, veh store.Vehicle, samples []store.Sample, dtcs []store.DTC) Summary {
 	sum := Summary{
-		SessionID: sess.ID, VIN: sess.VIN, Vehicle: veh.Name, Protocol: sess.Protocol, Notes: sess.Notes,
+		SessionID: sess.ID, VIN: sess.VIN, Vehicle: veh.Name, Protocol: sess.Protocol, DriveType: sess.DriveType, Notes: sess.Notes,
 		Start: sess.StartedAt, SampleCount: len(samples), PIDs: map[string]Stats{}, Events: []Event{},
 		DTCs: []DTCEntry{}, Metrics: map[string]float64{},
 	}

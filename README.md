@@ -55,7 +55,7 @@ Sold as "Made for FORScan", but it is a general OBD-II adapter that speaks the E
 vLinker FS (USB serial)
       │  ELM327 AT commands
       ▼
-carsight log          ── polls selected PIDs, reads VIN, DTCs, readiness
+carsight log  or  MCP start_drive   ── polls selected PIDs, reads VIN, DTCs, readiness
       │
       ▼
 SQLite (~/Library/Application Support/carsight/carsight.db)
@@ -63,8 +63,9 @@ SQLite (~/Library/Application Support/carsight/carsight.db)
       │
       ├── carsight report / trend / summary   ── Markdown or JSON on the command line
       │
-      └── carsight mcp    ── MCP server (stdio): any AI assistant queries
-                             summaries, baselines, trends and raw samples
+      └── carsight mcp    ── MCP server (stdio): any AI assistant scans the car,
+                             starts and stops drives, and queries summaries,
+                             baselines, trends and raw samples
 ```
 
 carsight never calls an AI service itself. The MCP server is the single entry point for AI analysis, so you choose the assistant (Claude Code, Claude Desktop, or any other MCP client) and it pulls exactly the data it needs.
@@ -84,7 +85,7 @@ This puts a single `carsight` binary in `$(go env GOPATH)/bin`. All commands sha
 ```
 carsight scan | log | clear-dtcs        talk to the car
 carsight sessions | report | trend | summary   look at logged data
-carsight mcp                            serve the data to an AI assistant
+carsight mcp                            serve carsight to an AI assistant
 ```
 
 `carsight <command> -h` lists each command's flags.
@@ -95,11 +96,13 @@ Plug in the vLinker, turn the ignition on, then:
 
 ```bash
 carsight scan                                           # protocol, VIN, supported PIDs, DTCs, readiness
-carsight log -name "Volvo V70" -notes "cold start, commute"   # log until Ctrl-C
+carsight log -name "Volvo V70" -type commute   # log until Ctrl-C
 carsight clear-dtcs                                     # asks for confirmation
 ```
 
 `-port auto` (the default) picks the first `/dev/tty.usbserial-*`; the baud rate is auto-detected. Fast PIDs (RPM, speed, load, throttle, MAF/MAP, STFT, timing, O2) are polled every cycle and slow ones (temperatures, LTFT, voltage) every `-slow-every` cycles. On CAN, each request tells the adapter to expect a single answer so it returns without waiting for its timeout. VIN, DTCs (at start and end) and monitor readiness are stored once per session.
+
+Each drive can carry a type (`-type`) and free-form notes (`-notes`). Suggested types: `cold_start`, `commute`, `city`, `highway`, `mixed`, `short_trip`, `idle_test`, `diagnostic` (others are allowed). Types let trends compare like with like: `carsight trend -type commute`.
 
 No car handy? `-port sim:volvo` or `-port sim:citroen` runs against a simulated adapter (CAN / KWP2000, with a warming engine and a stop-and-go drive). `-sim-speedup 30` compresses time, which also blurs PID-to-PID timing, so don't read too much into simulated idle figures.
 
@@ -117,7 +120,7 @@ A drive report has rule-based findings (overheating, slow warm-up, unstable idle
 
 ### AI analysis over MCP
 
-`carsight mcp` runs a read-only [MCP](https://modelcontextprotocol.io) server on stdio. Register it with your assistant, for example in Claude Code:
+`carsight mcp` runs an [MCP](https://modelcontextprotocol.io) server on stdio. The assistant can analyse logged drives and also drive the adapter: scan the car, start and stop logging, and label drives. Register it with your assistant, for example in Claude Code:
 
 ```bash
 claude mcp add carsight -- carsight mcp
@@ -133,17 +136,34 @@ or in an MCP client's JSON config (Claude Desktop, Cursor, …):
 }
 ```
 
-Then ask things like "how was my last drive?" or "are the Volvo's fuel trims drifting?".
+Claude Desktop doesn't use your shell's `PATH`, so give the binary's full path there. `carsight mcp` takes the same `-port`, `-baud` and `-sim-speedup` flags as `carsight log` to set the default adapter.
+
+Then ask things like "start logging, it's a cold-start commute", "what's the coolant temperature now?", "stop logging and tell me how the drive went" or "are the Volvo's fuel trims drifting on highway drives?".
+
+Car tools (need the adapter plugged in and the ignition on):
+
+| Tool | Does |
+|---|---|
+| `scan_car` | Protocol, VIN, supported PIDs, stored/pending DTCs, readiness; logs nothing |
+| `start_drive` | Starts logging in the background with a `drive_type`, `notes`, optional `vehicle_name` and `duration_min`; returns the new session at once |
+| `drive_status` | Live state: elapsed time, samples, polling rate, read errors, the latest value of each PID, DTCs seen |
+| `stop_drive` | Stops and saves the drive; returns the final status |
+| `label_drive` | Sets or corrects a drive's type and notes |
+| `clear_dtcs` | Clears DTCs, freeze frames and readiness (marked destructive; needs `confirm: true`, only on your explicit request) |
+
+The drive runs inside the `carsight mcp` process, so it keeps going between messages and stops (saving everything logged so far) when the assistant quits. Only one process can hold the adapter: if Claude Code and Claude Desktop both run carsight, start the drive from one of them. Keep the laptop awake while logging.
+
+Data tools (read-only):
 
 | Tool | Returns |
 |---|---|
 | `list_vehicles` | Cars in the database |
-| `list_sessions` | Drives, newest first; filter by vehicle and date range |
+| `list_sessions` | Drives, newest first; filter by vehicle, date range and drive type |
 | `get_drive_summary` | Compact analysis of one drive (stats, warm-up, idle, fuel trims, O2, voltage, events, DTCs, readiness, key metrics) plus z-scores against the car's earlier drives |
 | `get_drive_report` | The same as a Markdown report |
-| `get_trends` | Key metrics per drive in date order, with slopes per drive and per 30 days |
+| `get_trends` | Key metrics per drive in date order, with slopes per drive and per 30 days; filter by drive type |
 | `get_samples` | Raw time series for chosen PIDs and a time window, evenly downsampled to `max_points` (default 1000, up to 20000) |
-| `describe_pids` | PIDs, units, metric definitions and event thresholds |
+| `describe_pids` | PIDs, units, metric definitions, event thresholds and drive types |
 
 Prompts `analyze_drive` and `analyze_trends` give the assistant a technician's brief: rank anomalies, explain likely causes and checks, explain DTCs in plain language, and say when evidence is weak. The summary tools are usually enough; the assistant can pull raw samples when it wants to look closer (the shape of the warm-up curve, what happened around an event).
 
@@ -157,9 +177,10 @@ Good analysis depends on baselines: record several consistent drives per car (sa
 | `internal/elm327` | Serial protocol: AT init, prompt handling, error mapping, ISO-TP multi-frame reassembly |
 | `internal/obd` | PID definitions and decoding, supported-PID bitmaps, DTCs (CAN and K-line formats), VIN, readiness |
 | `internal/elmsim` | Simulated ELM327 + car for development and tests |
+| `internal/car` | Connect to the adapter, scan, clear DTCs, log a drive in the background (shared by the CLI and MCP) |
 | `internal/store` | SQLite schema and queries |
 | `internal/analyze` | Drive summary, events, baseline comparison, trends, Markdown reports |
-| `internal/mcpserver` | MCP tools and prompts over the database |
+| `internal/mcpserver` | MCP tools (car control and data) and prompts |
 
 ## Data to log (v1 PID set)
 
@@ -185,6 +206,7 @@ Implemented and tested against the built-in simulator; not yet verified on the r
 - [x] Read and clear DTCs, read VIN
 - [x] Per-drive stats + Markdown report
 - [x] AI analysis through an MCP server (any assistant)
+- [x] Start, monitor and stop drives from the AI assistant; drive types
 - [x] Baseline per car + trend comparison across drives
 
 Next:

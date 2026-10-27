@@ -24,6 +24,9 @@ func WriteReport(w io.Writer, s Summary, deltas []Delta) error {
 	}
 	fmt.Fprintf(&b, "- **Duration:** %s, **distance:** %.1f km\n", s.Duration, s.DistanceKm)
 	fmt.Fprintf(&b, "- **Samples:** %d (RPM at %.1f Hz)\n", s.SampleCount, s.RPMRateHz)
+	if s.DriveType != "" {
+		fmt.Fprintf(&b, "- **Drive type:** %s\n", s.DriveType)
+	}
 	if s.Notes != "" {
 		fmt.Fprintf(&b, "- **Notes:** %s\n", s.Notes)
 	}

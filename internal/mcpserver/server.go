@@ -1,7 +1,8 @@
-// Package mcpserver exposes the carsight database to AI assistants over the
-// Model Context Protocol. All tools are read-only: they list vehicles and
-// drives, return drive summaries, baseline comparisons, trends and Markdown
-// reports, and give access to the raw samples.
+// Package mcpserver exposes carsight to AI assistants over the Model Context
+// Protocol. Read-only tools list vehicles and drives, return drive summaries,
+// baseline comparisons, trends and Markdown reports, and give access to the
+// raw samples. Car tools scan the car through the adapter, start, monitor and
+// stop drive logging, label drives and clear trouble codes.
 package mcpserver
 
 import (
@@ -10,31 +11,58 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/jnszkr/carsight/internal/analyze"
+	"github.com/jnszkr/carsight/internal/car"
 	"github.com/jnszkr/carsight/internal/obd"
 	"github.com/jnszkr/carsight/internal/store"
 )
 
-const instructions = `carsight holds OBD-II data logged from the user's cars: one session per drive, with time-stamped PID samples, trouble codes (DTCs) and monitor readiness.
+const instructions = `carsight logs OBD-II data from the user's cars through a USB ELM327 adapter and holds what it logged: one session per drive, with a drive type, time-stamped PID samples, trouble codes (DTCs) and monitor readiness.
+
+Logging a drive: the adapter must be plugged into the car's OBD port and the laptop, with the ignition on. scan_car checks the connection and reads the VIN, supported PIDs, DTCs and readiness without logging. start_drive starts logging in the background and returns at once; ask the user what kind of drive it is (drive_type, see describe_pids) unless they said. drive_status shows live values while logging; stop_drive ends the drive and saves it, after which get_drive_summary analyses it. Logging also stops when the AI client exits. label_drive corrects a drive's type or notes afterwards. clear_dtcs erases trouble codes and readiness; only call it when the user explicitly asks.
 
 Start with list_vehicles / list_sessions. get_drive_summary gives the compact per-drive analysis (statistics, warm-up, warm idle, fuel trims, rule-based events, DTCs, readiness, and z-scores against that car's earlier drives) and is usually all you need. get_trends shows how key metrics move across drives. Use get_samples when you need the raw time series (for example to look at a specific event); it downsamples, so ask for the PIDs and time window you care about. describe_pids lists PIDs, units, metrics and thresholds. The analyze_drive and analyze_trends prompts describe how to write up a diagnosis.`
 
-// Server serves the carsight database over MCP.
+// Config configures a Server.
+type Config struct {
+	Version string
+	// Adapter is the default adapter for the car tools; a tool call may
+	// name another port.
+	Adapter car.Adapter
+}
+
+// Server serves carsight over MCP.
 type Server struct {
-	db *store.Store
+	MCP *mcp.Server
+
+	db      *store.Store
+	adapter car.Adapter
 	// Defaults applied when a tool call doesn't specify them.
 	BaselineDrives int
 	MinDuration    time.Duration
+
+	// base outlives tool calls: drives run under it until Close.
+	base   context.Context
+	cancel context.CancelFunc
+
+	// carMu serialises use of the adapter; drive is the drive being
+	// logged (or the last one).
+	carMu sync.Mutex
+	drive *car.Drive
 }
 
-// New returns an MCP server for db.
-func New(db *store.Store, version string) *mcp.Server {
-	s := &Server{db: db, BaselineDrives: 10, MinDuration: 5 * time.Minute}
-	srv := mcp.NewServer(&mcp.Implementation{Name: "carsight", Version: version}, &mcp.ServerOptions{Instructions: instructions})
+// New returns an MCP server for db. Call Close when the session ends to
+// stop and save a drive in progress.
+func New(db *store.Store, cfg Config) *Server {
+	s := &Server{db: db, adapter: cfg.Adapter, BaselineDrives: 10, MinDuration: 5 * time.Minute}
+	s.base, s.cancel = context.WithCancel(context.Background())
+	srv := mcp.NewServer(&mcp.Implementation{Name: "carsight", Version: cfg.Version}, &mcp.ServerOptions{Instructions: instructions})
+	s.MCP = srv
 
 	ro := &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: new(bool)}
 	add := func(name, title, desc string) *mcp.Tool {
@@ -56,7 +84,35 @@ func New(db *store.Store, version string) *mcp.Server {
 		"Raw time series for one drive. Times are seconds from the start of the drive. Each PID is downsampled "+
 			"evenly to at most max_points; narrow the window with from_s/to_s to see full resolution."), s.samples)
 	mcp.AddTool(srv, add("describe_pids", "Describe PIDs and metrics",
-		"PIDs carsight logs (name, unit, description), the key metrics used for baselines and trends, and the event thresholds."), s.describe)
+		"PIDs carsight logs (name, unit, description), the key metrics used for baselines and trends, the event thresholds, "+
+			"and the suggested drive types."), s.describe)
+
+	// Car tools talk to the adapter.
+	no := new(bool)
+	mcp.AddTool(srv, &mcp.Tool{Name: "scan_car", Title: "Scan the car",
+		Description: "Connect to the car through the adapter and read the OBD protocol, VIN, which PIDs it supports, " +
+			"stored and pending DTCs and monitor readiness. Nothing is logged. Needs the adapter plugged in and the ignition on; " +
+			"not available while a drive is being logged (use drive_status).",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}, s.scanCar)
+	mcp.AddTool(srv, &mcp.Tool{Name: "start_drive", Title: "Start logging a drive",
+		Description: "Start logging a drive in the background and return immediately with the new session. Reads the VIN, " +
+			"supported PIDs, DTCs and readiness, then polls the PIDs (several times a second) until stop_drive, duration_min, " +
+			"a lost connection, or the AI client exiting. One drive at a time.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: no}}, s.startDrive)
+	mcp.AddTool(srv, add("drive_status", "Drive status",
+		"State of the drive being logged (or the last one this server logged): session, elapsed time, samples, polling rate, "+
+			"read errors, the latest value of each PID and DTCs seen."), s.driveStatus)
+	mcp.AddTool(srv, &mcp.Tool{Name: "stop_drive", Title: "Stop logging",
+		Description: "Stop the drive being logged, save it and return its final status. Then use get_drive_summary with its session_id.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: no, IdempotentHint: true}}, s.stopDrive)
+	mcp.AddTool(srv, &mcp.Tool{Name: "label_drive", Title: "Label a drive",
+		Description: "Set a drive's type and notes, e.g. to correct them after the fact. Omitted fields keep their value.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: no, IdempotentHint: true, OpenWorldHint: no}}, s.labelDrive)
+	mcp.AddTool(srv, &mcp.Tool{Name: "clear_dtcs", Title: "Clear trouble codes",
+		Description: "Clear the car's stored DTCs, freeze frames and readiness monitors (OBD mode 04); also turns the MIL off. " +
+			"The car may fail an emissions inspection until the monitors re-run, and the codes are lost as evidence. " +
+			"Only call this when the user explicitly asks, with confirm=true. Engine off, ignition on.",
+		Annotations: &mcp.ToolAnnotations{DestructiveHint: new(true)}}, s.clearDTCs)
 
 	srv.AddPrompt(&mcp.Prompt{
 		Name:        "analyze_drive",
@@ -82,7 +138,18 @@ func New(db *store.Store, version string) *mcp.Server {
 		}
 		return prompt("Review trends", fmt.Sprintf(trendPrompt, target)), nil
 	})
-	return srv
+	return s
+}
+
+// Close stops and saves a drive in progress.
+func (s *Server) Close() {
+	s.cancel()
+	s.carMu.Lock()
+	d := s.drive
+	s.carMu.Unlock()
+	if d != nil {
+		<-d.Done()
+	}
 }
 
 func prompt(desc, text string) *mcp.GetPromptResult {
@@ -102,10 +169,11 @@ func (s *Server) listVehicles(ctx context.Context, _ *mcp.CallToolRequest, _ str
 }
 
 type listSessionsIn struct {
-	VIN   string `json:"vin,omitempty" jsonschema:"only this vehicle"`
-	Since string `json:"since,omitempty" jsonschema:"first day to include, YYYY-MM-DD"`
-	Until string `json:"until,omitempty" jsonschema:"last day to include, YYYY-MM-DD"`
-	Limit int    `json:"limit,omitempty" jsonschema:"maximum number of sessions (default 50)"`
+	VIN       string `json:"vin,omitempty" jsonschema:"only this vehicle"`
+	Since     string `json:"since,omitempty" jsonschema:"first day to include, YYYY-MM-DD"`
+	Until     string `json:"until,omitempty" jsonschema:"last day to include, YYYY-MM-DD"`
+	Limit     int    `json:"limit,omitempty" jsonschema:"maximum number of sessions (default 50)"`
+	DriveType string `json:"drive_type,omitempty" jsonschema:"only drives of this type, e.g. commute"`
 }
 
 type sessionInfo struct {
@@ -115,6 +183,7 @@ type sessionInfo struct {
 	Duration  float64   `json:"duration_s"` // 0 while still logging
 	Running   bool      `json:"still_logging,omitempty"`
 	Protocol  string    `json:"protocol,omitempty"`
+	DriveType string    `json:"drive_type,omitempty"`
 	Notes     string    `json:"notes,omitempty"`
 }
 
@@ -137,12 +206,17 @@ func (s *Server) listSessions(ctx context.Context, _ *mcp.CallToolRequest, in li
 		limit = 50
 	}
 	out := listSessionsOut{Sessions: []sessionInfo{}}
-	for i, ss := range ss {
-		if i == limit {
+	dt := car.NormalizeDriveType(in.DriveType)
+	for _, ss := range ss {
+		if dt != "" && ss.DriveType != dt {
+			continue
+		}
+		if len(out.Sessions) == limit {
 			out.More = true
 			break
 		}
-		info := sessionInfo{ID: ss.ID, VIN: ss.VIN, StartedAt: ss.StartedAt, Protocol: ss.Protocol, Notes: ss.Notes, Running: ss.EndedAt.IsZero()}
+		info := sessionInfo{ID: ss.ID, VIN: ss.VIN, StartedAt: ss.StartedAt, Protocol: ss.Protocol,
+			DriveType: ss.DriveType, Notes: ss.Notes, Running: ss.EndedAt.IsZero()}
 		if !ss.EndedAt.IsZero() {
 			info.Duration = math.Round(ss.EndedAt.Sub(ss.StartedAt).Seconds())
 		}
@@ -209,6 +283,7 @@ type trendsIn struct {
 	Since       string  `json:"since,omitempty" jsonschema:"first day to include, YYYY-MM-DD"`
 	Until       string  `json:"until,omitempty" jsonschema:"last day to include, YYYY-MM-DD"`
 	MinDuration float64 `json:"min_duration_min,omitempty" jsonschema:"ignore drives shorter than this many minutes (default 5)"`
+	DriveType   string  `json:"drive_type,omitempty" jsonschema:"only drives of this type, e.g. commute, so like is compared with like"`
 }
 
 func (s *Server) trends(ctx context.Context, _ *mcp.CallToolRequest, in trendsIn) (*mcp.CallToolResult, any, error) {
@@ -231,7 +306,8 @@ func (s *Server) trends(ctx context.Context, _ *mcp.CallToolRequest, in trendsIn
 	if in.MinDuration > 0 {
 		minDur = time.Duration(in.MinDuration * float64(time.Minute))
 	}
-	t, err := analyze.AnalyzeTrends(ctx, s.db, vin, since, until, minDur)
+	t, err := analyze.AnalyzeTrends(ctx, s.db, analyze.TrendFilter{VIN: vin, Since: since, Until: until,
+		MinDuration: minDur, DriveType: car.NormalizeDriveType(in.DriveType)})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -339,10 +415,11 @@ type describeOut struct {
 	PIDs       []pidInfo          `json:"pids"`
 	Metrics    map[string]string  `json:"metrics"`
 	Thresholds map[string]float64 `json:"thresholds"`
+	DriveTypes map[string]string  `json:"drive_types"`
 }
 
 func (s *Server) describe(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
-	out := describeOut{Metrics: analyze.MetricDescriptions, Thresholds: map[string]float64{
+	out := describeOut{Metrics: analyze.MetricDescriptions, DriveTypes: car.DriveTypes, Thresholds: map[string]float64{
 		"warm_coolant_c":            analyze.WarmC,
 		"overheat_coolant_c":        analyze.OverheatC,
 		"low_voltage_running_v":     analyze.LowVoltageRunning,

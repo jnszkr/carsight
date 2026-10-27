@@ -92,6 +92,7 @@ type TrendDrive struct {
 	Start      time.Time          `json:"start"`
 	Duration   Duration           `json:"duration_s"`
 	DistanceKm float64            `json:"distance_km"`
+	DriveType  string             `json:"drive_type,omitempty"`
 	ColdStart  bool               `json:"cold_start"`
 	Metrics    map[string]float64 `json:"metrics"`
 	Events     []string           `json:"events"`
@@ -110,22 +111,31 @@ type TrendAnalysis struct {
 // Summaries returns the full drive summaries behind the analysis.
 func (t TrendAnalysis) Summaries() []Summary { return t.summaries }
 
-// AnalyzeTrends loads the usable drives of one car in [since, until) and fits
-// trends through their key metrics. Zero times are unbounded.
-func AnalyzeTrends(ctx context.Context, db *store.Store, vin string, since, until time.Time, minDur time.Duration) (TrendAnalysis, error) {
+// TrendFilter selects the drives of one car for a trend analysis.
+type TrendFilter struct {
+	VIN          string
+	Since, Until time.Time     // [Since, Until); zero is unbounded
+	MinDuration  time.Duration // ignore shorter drives
+	DriveType    string        // only drives of this type; empty matches all
+}
+
+// AnalyzeTrends loads the usable drives matching f and fits trends through
+// their key metrics.
+func AnalyzeTrends(ctx context.Context, db *store.Store, f TrendFilter) (TrendAnalysis, error) {
+	vin := f.VIN
 	out := TrendAnalysis{VIN: vin, Drives: []TrendDrive{}, Trends: []TrendLine{}}
 	if v, err := db.Vehicle(ctx, vin); err == nil {
 		out.Vehicle = v.Name
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return out, err
 	}
-	ss, err := db.Sessions(ctx, vin, since, until)
+	ss, err := db.Sessions(ctx, vin, f.Since, f.Until)
 	if err != nil {
 		return out, err
 	}
 	slices.Reverse(ss) // chronological
 	for _, s := range ss {
-		if !usable(s, minDur) {
+		if !usable(s, f.MinDuration) || f.DriveType != "" && s.DriveType != f.DriveType {
 			continue
 		}
 		d, err := Load(ctx, db, s)
@@ -134,7 +144,7 @@ func AnalyzeTrends(ctx context.Context, db *store.Store, vin string, since, unti
 		}
 		out.summaries = append(out.summaries, d)
 		td := TrendDrive{SessionID: d.SessionID, Start: d.Start, Duration: d.Duration, DistanceKm: d.DistanceKm,
-			ColdStart: d.WarmUp.ColdStart, Metrics: d.Metrics, Events: []string{}}
+			DriveType: d.DriveType, ColdStart: d.WarmUp.ColdStart, Metrics: d.Metrics, Events: []string{}}
 		for _, e := range d.Events {
 			td.Events = append(td.Events, e.Severity+": "+e.Detail)
 		}

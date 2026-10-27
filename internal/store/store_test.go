@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -69,5 +70,39 @@ func TestStore(t *testing.T) {
 	}
 	if list, _ := s.Sessions(ctx, "VIN1", t0.Add(time.Hour), time.Time{}); len(list) != 0 {
 		t.Errorf("since filter: %+v", list)
+	}
+}
+
+func TestMigrateAddsDriveType(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The sessions table as created before drive types existed.
+	if _, err := old.Exec(`CREATE TABLE vehicles (vin TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', protocol TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);
+		CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, vin TEXT NOT NULL REFERENCES vehicles(vin), started_at INTEGER NOT NULL,
+			ended_at INTEGER, protocol TEXT NOT NULL DEFAULT '', readiness TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '');
+		INSERT INTO vehicles VALUES ('V', 'Car', 'CAN', 0);
+		INSERT INTO sessions (vin, started_at, notes) VALUES ('V', 0, 'old');`); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	if err := s.Describe(ctx, 1, "commute", "old"); err != nil {
+		t.Fatal(err)
+	}
+	ss, err := s.Session(ctx, 1)
+	if err != nil || ss.DriveType != "commute" || ss.Notes != "old" {
+		t.Fatalf("%+v %v", ss, err)
+	}
+	if err := s.Describe(ctx, 99, "", ""); !errors.Is(err, ErrNotFound) {
+		t.Errorf("describe missing session: %v", err)
 	}
 }
