@@ -128,6 +128,47 @@ func WriteReport(w io.Writer, s Summary, deltas []Delta) error {
 		b.WriteString("\n")
 	}
 
+	if info := s.Snapshots; info != nil && info.Start != nil {
+		st := info.Start
+		b.WriteString("## Snapshot\n\n")
+		if vi := st.VehicleInfo; vi != nil {
+			if len(vi.ECUNames) > 0 {
+				fmt.Fprintf(&b, "ECUs: %s. ", strings.Join(vi.ECUNames, ", "))
+			}
+			if len(vi.CalibrationIDs) > 0 {
+				fmt.Fprintf(&b, "Calibration IDs: %s (CVN %s).", strings.Join(vi.CalibrationIDs, ", "), strings.Join(vi.CVNs, ", "))
+			}
+			b.WriteString("\n\n")
+		}
+		if ff := st.FreezeFrame; ff != nil {
+			fmt.Fprintf(&b, "Freeze frame (%s): ", ff.DTC)
+			var parts []string
+			for _, k := range sortedKeys(ff.Values) {
+				parts = append(parts, fmt.Sprintf("%s %.4g", k, ff.Values[k]))
+			}
+			b.WriteString(strings.Join(parts, ", ") + ".\n\n")
+		}
+		if len(s.Misfires) > 0 {
+			b.WriteString("Misfires this drive cycle by cylinder: ")
+			var parts []string
+			for _, c := range sortedKeys(s.Misfires) {
+				parts = append(parts, fmt.Sprintf("%s: %.0f", c, s.Misfires[c]))
+			}
+			b.WriteString(strings.Join(parts, ", ") + ".\n\n")
+		}
+		b.WriteString("| Value at start | |\n|---|---|\n")
+		for _, k := range sortedKeys(st.Values) {
+			v := fmt.Sprintf("%.4g", st.Values[k])
+			if l := st.Labels[k]; l != "" {
+				v = l
+			} else if p, ok := obd.ByName(k); ok {
+				v += " " + p.Unit
+			}
+			fmt.Fprintf(&b, "| %s | %s |\n", k, v)
+		}
+		b.WriteString("\n")
+	}
+
 	b.WriteString("## All PIDs\n\n| PID | Unit | n | Min | Mean | Max |\n|---|---|---|---|---|---|\n")
 	for _, name := range sortedKeys(s.PIDs) {
 		st := s.PIDs[name]

@@ -25,7 +25,9 @@ import (
 
 	"github.com/jnszkr/carsight/internal/analyze"
 	"github.com/jnszkr/carsight/internal/car"
+	"github.com/jnszkr/carsight/internal/dashboard"
 	"github.com/jnszkr/carsight/internal/mcpserver"
+	"github.com/jnszkr/carsight/internal/obd"
 	"github.com/jnszkr/carsight/internal/store"
 )
 
@@ -44,6 +46,7 @@ Data commands:
   report      Markdown report for one drive (default: latest)
   trend       Markdown trend report across drives
   summary     drive summary as JSON
+  dashboard   serve the local web dashboard of logged drives
   mcp         serve carsight to an AI assistant over MCP (stdio): analysis,
               raw data, and starting/stopping drives
 
@@ -74,6 +77,8 @@ func main() {
 		err = summaryCmd(ctx, args)
 	case "mcp":
 		err = mcpCmd(ctx, args)
+	case "dashboard":
+		err = dashboardCmd(ctx, args)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
@@ -129,12 +134,15 @@ func carCommand(ctx context.Context, cmd string, args []string) error {
 	adapter := adapterFlags(fs)
 	var opts car.DriveOptions
 	var yes *bool
+	var dash *string
 	switch cmd {
 	case "log":
+		dash = dashboardFlag(fs)
 		fs.StringVar(&opts.Name, "name", "", "friendly vehicle name, e.g. 'Volvo V70'")
 		fs.StringVar(&opts.DriveType, "type", "", "drive type: "+strings.Join(slices.Sorted(maps.Keys(car.DriveTypes)), ", ")+" (or your own)")
 		fs.StringVar(&opts.Notes, "notes", "", "notes for this session, e.g. 'rough idle after refuelling'")
-		fs.IntVar(&opts.SlowEvery, "slow-every", 5, "poll slow PIDs (temperatures, voltage, LTFT) every N cycles")
+		fs.IntVar(&opts.SlowEvery, "slow-every", 5, "poll each slow PID (temperatures, voltage, LTFT) about every N cycles")
+		fs.IntVar(&opts.ExtraEvery, "extra-every", 30, "poll each extra PID (levels, pressures, counters, secondary sensors) about every N cycles")
 		fs.DurationVar(&opts.Duration, "duration", 0, "stop logging after this long (0 = until Ctrl-C)")
 	case "clear-dtcs":
 		yes = fs.Bool("yes", false, "don't ask for confirmation")
@@ -166,8 +174,20 @@ func carCommand(ctx context.Context, cmd string, args []string) error {
 		if err != nil {
 			return err
 		}
+		if *dash != "off" {
+			srv := dashboard.New(db, func() *car.Drive { return d })
+			defer srv.Close()
+			if base, err := srv.Start(*dash); err != nil {
+				log.Printf("dashboard: %v", err)
+			} else {
+				log.Printf("live dashboard: %s/drive/%d", base, d.Status().SessionID)
+			}
+		}
 		log.Print("logging; press Ctrl-C to stop")
 		<-d.Done()
+		if *dash != "off" {
+			log.Print("the dashboard stops now; 'carsight dashboard' shows the drive again")
+		}
 		fmt.Println(d.Status().SessionID)
 		return nil
 	}
@@ -183,22 +203,30 @@ func scan(ctx context.Context, c *car.Car) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("\nLogged PIDs:")
-	for _, p := range s.LoggedPIDs {
-		mark := "no "
-		if p.Supported {
-			mark = "yes"
+	fmt.Printf("\nSupported mode 01 PIDs: %s\n", strings.Join(s.AllPIDs, " "))
+	snap := s.Snapshot
+	fmt.Println("\nCurrent values (polled during a drive unless marked 'once'):")
+	for _, p := range obd.All {
+		v, ok := snap.Values[p.Name]
+		if !ok {
+			continue
 		}
-		fmt.Printf("  %s  %s %-16s %s\n", mark, p.PID[2:], p.Name, p.Desc)
+		val := fmt.Sprintf("%g %s", v, p.Unit)
+		if l := snap.Labels[p.Name]; l != "" {
+			val = l
+		}
+		fmt.Printf("  %02X %-26s %-26s %s (%s)\n", p.Code, p.Name, val, p.Desc, p.Rate)
 	}
-	fmt.Printf("\nAll supported mode 01 PIDs: %s\n", strings.Join(s.AllPIDs, " "))
+	for _, code := range slices.Sorted(maps.Keys(snap.Undecoded)) {
+		fmt.Printf("  %s %-26s %s\n", code, "(not decoded)", snap.Undecoded[code])
+	}
 	for _, e := range s.DTCErrors {
 		fmt.Printf("\nDTC read error: %s\n", e)
 	}
 	for _, kc := range []struct {
 		kind  string
 		codes []string
-	}{{"Stored", s.StoredDTCs}, {"Pending", s.PendingDTCs}} {
+	}{{"Stored", s.StoredDTCs}, {"Pending", s.PendingDTCs}, {"Permanent", snap.PermanentDTCs}} {
 		kind, codes := kc.kind, kc.codes
 		if len(codes) == 0 {
 			fmt.Printf("\n%s DTCs: none\n", kind)
@@ -211,6 +239,41 @@ func scan(ctx context.Context, c *car.Car) error {
 		for _, k := range slices.Sorted(maps.Keys(r.Monitors)) {
 			fmt.Printf("  %-18s %s\n", k, r.Monitors[k])
 		}
+	}
+	if ff := snap.FreezeFrame; ff != nil {
+		fmt.Printf("\nFreeze frame (set with %s):\n", ff.DTC)
+		for _, k := range slices.Sorted(maps.Keys(ff.Values)) {
+			fmt.Printf("  %-26s %g\n", k, ff.Values[k])
+		}
+	}
+	if vi := snap.VehicleInfo; vi != nil {
+		fmt.Println()
+		for _, kv := range []struct {
+			k  string
+			vs []string
+		}{{"ECUs", vi.ECUNames}, {"Calibration IDs", vi.CalibrationIDs}, {"CVNs", vi.CVNs}} {
+			if len(kv.vs) > 0 {
+				fmt.Printf("%s: %s\n", kv.k, strings.Join(kv.vs, ", "))
+			}
+		}
+	}
+	if len(snap.MonitorTests) > 0 {
+		failed := 0
+		for _, t := range snap.MonitorTests {
+			if !t.Pass {
+				failed++
+				fmt.Printf("\nFAILED monitor test: %s %s: %g (limits %g..%g %s)", t.Monitor, t.Test, t.Value, t.Min, t.Max, t.Unit)
+			}
+		}
+		fmt.Printf("\nMonitor tests: %d, %d failed\n", len(snap.MonitorTests), failed)
+		for _, t := range snap.MonitorTests {
+			if t.Cylinder() > 0 && t.Value > 0 {
+				fmt.Printf("  %s, %s: %g\n", t.Monitor, t.Test, t.Value)
+			}
+		}
+	}
+	for _, e := range snap.Errors {
+		fmt.Printf("\nCouldn't read %s\n", e)
 	}
 	return nil
 }
@@ -381,16 +444,41 @@ func trendCmd(ctx context.Context, args []string) error {
 	return write(*out, func(fh *os.File) error { return analyze.WriteTrendReport(fh, name, t.Summaries(), t.Trends) })
 }
 
-func mcpCmd(ctx context.Context, args []string) error {
-	fs, dbPath := newFlags("mcp", "")
-	adapter := adapterFlags(fs)
+// dashboardFlag adds the flag that sets the dashboard's address.
+func dashboardFlag(fs *flag.FlagSet) *string {
+	return fs.String("dashboard", dashboard.DefaultAddr, "local dashboard address ('off' to disable); a free port is used if it is taken")
+}
+
+func dashboardCmd(ctx context.Context, args []string) error {
+	fs, dbPath := newFlags("dashboard", "")
+	addr := dashboardFlag(fs)
 	fs.Parse(args)
 	db, err := openDB(*dbPath)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	srv := mcpserver.New(db, mcpserver.Config{Version: version(), Adapter: *adapter})
+	srv := dashboard.New(db, nil)
+	base, err := srv.Start(*addr)
+	if err != nil {
+		return err
+	}
+	log.Printf("dashboard: %s (Ctrl-C to stop)", base)
+	<-ctx.Done()
+	return srv.Close()
+}
+
+func mcpCmd(ctx context.Context, args []string) error {
+	fs, dbPath := newFlags("mcp", "")
+	adapter := adapterFlags(fs)
+	dash := dashboardFlag(fs)
+	fs.Parse(args)
+	db, err := openDB(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	srv := mcpserver.New(db, mcpserver.Config{Version: version(), Adapter: *adapter, Dashboard: *dash})
 	// Ending the session (the client exits) stops and saves a drive in progress.
 	defer srv.Close()
 	// stdout carries the protocol; logs go to stderr.

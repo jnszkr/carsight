@@ -124,3 +124,101 @@ func TestFormatDTC(t *testing.T) {
 		t.Error(got)
 	}
 }
+
+func TestGroups(t *testing.T) {
+	gs := Groups(All)
+	seen := map[byte]bool{}
+	for _, g := range gs {
+		if seen[g.Code] {
+			t.Errorf("PID %02X in two groups", g.Code)
+		}
+		seen[g.Code] = true
+		for _, p := range g.PIDs {
+			if p.Bytes > g.Bytes || g.Rate > p.Rate {
+				t.Errorf("%s: group bytes %d rate %v", p.Name, g.Bytes, g.Rate)
+			}
+		}
+	}
+	names := map[string]bool{}
+	for _, p := range All {
+		if names[p.Name] {
+			t.Errorf("duplicate name %s", p.Name)
+		}
+		names[p.Name] = true
+	}
+	// O2 voltage and trim come back from one request.
+	c := &Client{R: fakeReq{"0114": {{0x41, 0x14, 0x5A, 0x80}}}}
+	for _, g := range gs {
+		if g.Code == 0x14 {
+			vs, err := c.ReadGroup(context.Background(), g)
+			if err != nil || len(vs) != 2 || vs[0] != 0.45 || vs[1] != 0 {
+				t.Errorf("o2 group: %v %v", vs, err)
+			}
+		}
+	}
+	if v := o2trim([]byte{0x5A, 0xFF}); !math.IsNaN(v) {
+		t.Errorf("unused O2 trim = %v, want NaN", v)
+	}
+}
+
+func TestParseMonitorTests(t *testing.T) {
+	// Cylinder 3 misfire monitor: TID 0C, counts, 7 misfires, limits 0..65535;
+	// and a failing O2 test in mV.
+	ts := ParseMonitorTests([]byte{0x46,
+		0xA4, 0x0C, 0x24, 0x00, 0x07, 0x00, 0x00, 0xFF, 0xFF,
+		0x01, 0x01, 0x0A, 0x10, 0x00, 0x00, 0x00, 0x0F, 0x00})
+	if len(ts) != 2 {
+		t.Fatalf("%+v", ts)
+	}
+	if m := ts[0]; m.Cylinder() != 3 || m.Value != 7 || !m.Pass || m.Unit != "count" || m.Monitor != "misfire cylinder 3" {
+		t.Errorf("misfire: %+v", m)
+	}
+	if o := ts[1]; o.Pass || o.Unit != "mV" || math.Abs(o.Value-4096*0.122) > 1e-6 || o.Cylinder() != 0 {
+		t.Errorf("o2: %+v", o)
+	}
+}
+
+func TestVehicleInfo(t *testing.T) {
+	calid := []byte("CAL123\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+	can := &Client{CAN: true, R: fakeReq{
+		"0900": {{0x49, 0x00, 0x54, 0x40, 0x00, 0x00}}, // 02 04 06 0A
+		"0904": {append([]byte{0x49, 0x04, 0x01}, calid...)},
+		"0906": {{0x49, 0x06, 0x01, 0xDE, 0xAD, 0xBE, 0xEF}},
+		"090A": {append([]byte{0x49, 0x0A, 0x01}, []byte("ECM\x00-EngineControl\x00")...)},
+	}}
+	vi, err := can.ReadVehicleInfo(context.Background())
+	if err != nil || !reflect.DeepEqual(vi.CalibrationIDs, []string{"CAL123"}) || !reflect.DeepEqual(vi.CVNs, []string{"DEADBEEF"}) ||
+		!reflect.DeepEqual(vi.ECUNames, []string{"ECM-EngineControl"}) {
+		t.Errorf("CAN: %+v %v", vi, err)
+	}
+	// K-line splits answers into numbered 4-byte messages and puts a count
+	// before the bitmap.
+	kline := &Client{R: fakeReq{
+		"0900": {{0x49, 0x00, 0x01, 0x14, 0x00, 0x00, 0x00}}, // 04 06
+		"0904": {{0x49, 0x04, 0x02, 0x34, 0x00, 0x00, 0x00}, {0x49, 0x04, 0x01, 0x41, 0x42, 0x43, 0x31},
+			{0x49, 0x04, 0x03, 0, 0, 0, 0}, {0x49, 0x04, 0x04, 0, 0, 0, 0}},
+		"0906": {{0x49, 0x06, 0x01, 0x01, 0x02, 0x03, 0x04}},
+	}}
+	vi, err = kline.ReadVehicleInfo(context.Background())
+	if err != nil || !reflect.DeepEqual(vi.CalibrationIDs, []string{"ABC14"}) || !reflect.DeepEqual(vi.CVNs, []string{"01020304"}) {
+		t.Errorf("K-line: %+v %v", vi, err)
+	}
+}
+
+func TestFreezeFrame(t *testing.T) {
+	c := &Client{R: fakeReq{
+		"020200": {{0x42, 0x02, 0x00, 0x04, 0x20}},
+		"020000": {{0x42, 0x00, 0x00, 0x48, 0x18, 0x00, 0x00}}, // 02 05 0C 0D
+		"020500": {{0x42, 0x05, 0x00, 0x7B}},
+		"020C00": {{0x42, 0x0C, 0x00, 0x1A, 0xF8}},
+		"020D00": {{0x42, 0x0D, 0x00, 0x32}},
+	}}
+	ff, err := c.ReadFreezeFrame(context.Background())
+	if err != nil || ff == nil || ff.DTC != "P0420" || ff.Values["coolant_temp"] != 83 || ff.Values["rpm"] != 1726 || ff.Values["speed"] != 50 {
+		t.Errorf("%+v %v", ff, err)
+	}
+	none := &Client{R: fakeReq{"020200": {{0x42, 0x02, 0x00, 0x00, 0x00}}}}
+	if ff, err := none.ReadFreezeFrame(context.Background()); ff != nil || err != nil {
+		t.Errorf("no frame: %+v %v", ff, err)
+	}
+}

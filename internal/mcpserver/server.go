@@ -18,13 +18,14 @@ import (
 
 	"github.com/jnszkr/carsight/internal/analyze"
 	"github.com/jnszkr/carsight/internal/car"
+	"github.com/jnszkr/carsight/internal/dashboard"
 	"github.com/jnszkr/carsight/internal/obd"
 	"github.com/jnszkr/carsight/internal/store"
 )
 
-const instructions = `carsight logs OBD-II data from the user's cars through a USB ELM327 adapter and holds what it logged: one session per drive, with a drive type, time-stamped PID samples, trouble codes (DTCs) and monitor readiness.
+const instructions = `carsight logs OBD-II data from the user's cars through a USB ELM327 adapter and holds what it logged: one session per drive, with a drive type, time-stamped samples of every standard PID the car supports, trouble codes (stored, pending, permanent), and a snapshot at the start and end of the drive (every value, monitor readiness, freeze frame, calibration IDs, monitor test results such as per-cylinder misfire counts).
 
-Logging a drive: the adapter must be plugged into the car's OBD port and the laptop, with the ignition on. scan_car checks the connection and reads the VIN, supported PIDs, DTCs and readiness without logging. start_drive starts logging in the background and returns at once; ask the user what kind of drive it is (drive_type, see describe_pids) unless they said. drive_status shows live values while logging; stop_drive ends the drive and saves it, after which get_drive_summary analyses it. Logging also stops when the AI client exits. label_drive corrects a drive's type or notes afterwards. clear_dtcs erases trouble codes and readiness; only call it when the user explicitly asks.
+Logging a drive: the adapter must be plugged into the car's OBD port and the laptop, with the ignition on. scan_car checks the connection and reads the VIN, supported PIDs, DTCs and readiness without logging. start_drive starts logging in the background and returns at once; ask the user what kind of drive it is (drive_type, see describe_pids) unless they said. start_drive returns a dashboard_url: a local web page charting the drive live; give it to the user (or open it in a browser). open_dashboard gives the page for a stored drive or the list of drives. drive_status shows live values while logging; stop_drive ends the drive and saves it, after which get_drive_summary analyses it. Logging also stops when the AI client exits. label_drive corrects a drive's type or notes afterwards. clear_dtcs erases trouble codes and readiness; only call it when the user explicitly asks.
 
 Start with list_vehicles / list_sessions. get_drive_summary gives the compact per-drive analysis (statistics, warm-up, warm idle, fuel trims, rule-based events, DTCs, readiness, and z-scores against that car's earlier drives) and is usually all you need. get_trends shows how key metrics move across drives. Use get_samples when you need the raw time series (for example to look at a specific event); it downsamples, so ask for the PIDs and time window you care about. describe_pids lists PIDs, units, metrics and thresholds. The analyze_drive and analyze_trends prompts describe how to write up a diagnosis.`
 
@@ -34,6 +35,9 @@ type Config struct {
 	// Adapter is the default adapter for the car tools; a tool call may
 	// name another port.
 	Adapter car.Adapter
+	// Dashboard is the address of the local dashboard ("" for
+	// dashboard.DefaultAddr, "off" to disable it). It starts on first use.
+	Dashboard string
 }
 
 // Server serves carsight over MCP.
@@ -54,12 +58,22 @@ type Server struct {
 	// logged (or the last one).
 	carMu sync.Mutex
 	drive *car.Drive
+
+	dash     *dashboard.Server
+	dashAddr string
 }
 
 // New returns an MCP server for db. Call Close when the session ends to
 // stop and save a drive in progress.
 func New(db *store.Store, cfg Config) *Server {
-	s := &Server{db: db, adapter: cfg.Adapter, BaselineDrives: 10, MinDuration: 5 * time.Minute}
+	s := &Server{db: db, adapter: cfg.Adapter, BaselineDrives: 10, MinDuration: 5 * time.Minute, dashAddr: cfg.Dashboard}
+	if cfg.Dashboard != "off" {
+		s.dash = dashboard.New(db, func() *car.Drive {
+			s.carMu.Lock()
+			defer s.carMu.Unlock()
+			return s.drive
+		})
+	}
 	s.base, s.cancel = context.WithCancel(context.Background())
 	srv := mcp.NewServer(&mcp.Implementation{Name: "carsight", Version: cfg.Version}, &mcp.ServerOptions{Instructions: instructions})
 	s.MCP = srv
@@ -83,8 +97,13 @@ func New(db *store.Store, cfg Config) *Server {
 	mcp.AddTool(srv, add("get_samples", "Raw samples",
 		"Raw time series for one drive. Times are seconds from the start of the drive. Each PID is downsampled "+
 			"evenly to at most max_points; narrow the window with from_s/to_s to see full resolution."), s.samples)
+	mcp.AddTool(srv, add("open_dashboard", "Dashboard link",
+		"Link to carsight's local web dashboard, which charts every PID of a drive (live while it is being logged, "+
+			"with zoom and a synced crosshair for stored drives). Give the link to the user. Without session_id it links "+
+			"the list of drives."), s.openDashboard)
 	mcp.AddTool(srv, add("describe_pids", "Describe PIDs and metrics",
-		"PIDs carsight logs (name, unit, description), the key metrics used for baselines and trends, the event thresholds, "+
+		"Every PID carsight can log (name, unit, description, polling rate: fast every cycle, slow every few cycles, extra "+
+			"every ~10 s, once only in the start/end snapshot; a drive logs the ones the car supports), the key metrics used for baselines and trends, the event thresholds, "+
 			"and the suggested drive types."), s.describe)
 
 	// Car tools talk to the adapter.
@@ -150,6 +169,41 @@ func (s *Server) Close() {
 	if d != nil {
 		<-d.Done()
 	}
+	if s.dash != nil {
+		s.dash.Close()
+	}
+}
+
+// dashboardURL starts the dashboard if needed and returns the link to path,
+// or "" if the dashboard is off or can't listen.
+func (s *Server) dashboardURL(path string) (string, error) {
+	if s.dash == nil {
+		return "", errors.New("the dashboard is disabled (carsight mcp -dashboard off)")
+	}
+	base, err := s.dash.Start(s.dashAddr)
+	if err != nil {
+		return "", fmt.Errorf("start dashboard: %w", err)
+	}
+	return base + path, nil
+}
+
+type openDashboardIn struct {
+	SessionID int64 `json:"session_id,omitempty" jsonschema:"drive to show; omit for the list of drives"`
+}
+
+func (s *Server) openDashboard(ctx context.Context, _ *mcp.CallToolRequest, in openDashboardIn) (*mcp.CallToolResult, any, error) {
+	path := "/"
+	if in.SessionID != 0 {
+		if _, err := s.session(ctx, in.SessionID, ""); err != nil {
+			return nil, nil, err
+		}
+		path = fmt.Sprintf("/drive/%d", in.SessionID)
+	}
+	u, err := s.dashboardURL(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, map[string]string{"dashboard_url": u}, nil
 }
 
 func prompt(desc, text string) *mcp.GetPromptResult {
@@ -404,11 +458,13 @@ func (s *Server) samples(ctx context.Context, _ *mcp.CallToolRequest, in samples
 }
 
 type pidInfo struct {
-	Name string `json:"name"`
-	PID  string `json:"pid"`
-	Unit string `json:"unit"`
-	Desc string `json:"description"`
-	Slow bool   `json:"polled_less_often,omitempty"`
+	Name string   `json:"name"`
+	PID  string   `json:"pid"`
+	Unit string   `json:"unit"`
+	Desc string   `json:"description"`
+	Rate obd.Rate `json:"rate"`
+	// Labels names the values of enumerated PIDs.
+	Labels map[int]string `json:"labels,omitempty"`
 }
 
 type describeOut struct {
@@ -433,8 +489,8 @@ func (s *Server) describe(_ context.Context, _ *mcp.CallToolRequest, _ struct{})
 		"baseline_min_drives":       analyze.MinBaseline,
 		"default_min_drive_minutes": s.MinDuration.Minutes(),
 	}}
-	for _, p := range obd.Default {
-		out.PIDs = append(out.PIDs, pidInfo{Name: p.Name, PID: fmt.Sprintf("01%02X", p.Code), Unit: p.Unit, Desc: p.Desc, Slow: p.Slow})
+	for _, p := range obd.All {
+		out.PIDs = append(out.PIDs, pidInfo{Name: p.Name, PID: fmt.Sprintf("01%02X", p.Code), Unit: p.Unit, Desc: p.Desc, Rate: p.Rate, Labels: p.Labels})
 	}
 	return nil, out, nil
 }

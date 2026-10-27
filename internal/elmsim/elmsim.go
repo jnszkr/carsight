@@ -12,15 +12,22 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jnszkr/carsight/internal/obd"
 )
 
 // Car describes the simulated vehicle.
 type Car struct {
-	VIN         string
-	CAN         bool
-	PIDs        []byte   // supported mode 01 PIDs (01..0x5F)
-	DTCs        []string // stored codes, e.g. "P0133"
-	Pending     []string
+	VIN       string
+	CAN       bool
+	PIDs      []byte   // supported mode 01 PIDs, including the 0x20/0x40/... bitmap PIDs that chain them
+	DTCs      []string // stored codes, e.g. "P0133"; the first one has a freeze frame
+	Pending   []string
+	Permanent []string // permanent codes (mode 0A), which clearing doesn't erase
+	// Misfires is the misfire rate per minute by cylinder, reported in the
+	// mode 06 misfire monitor (CAN only).
+	Misfires    map[int]float64
+	Cylinders   int
 	AmbientC    float64
 	LTFT        float64 // long-term fuel trim offset in %, to simulate a lean/rich engine
 	CoolantMaxC float64 // steady-state coolant temperature; ~90 for a healthy thermostat
@@ -35,7 +42,9 @@ type Car struct {
 func Volvo() Car {
 	return Car{
 		VIN: "YV1BW84B1B1234567", CAN: true,
-		PIDs:     []byte{0x01, 0x04, 0x05, 0x06, 0x07, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x13, 0x14, 0x15, 0x1C, 0x20, 0x21, 0x40, 0x42},
+		PIDs: []byte{0x01, 0x03, 0x04, 0x05, 0x06, 0x07, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x13, 0x14, 0x15, 0x1C, 0x1F, 0x20,
+			0x21, 0x2F, 0x30, 0x31, 0x33, 0x3C, 0x40, 0x41, 0x42, 0x43, 0x44, 0x46, 0x49, 0x4C, 0x51},
+		Misfires: map[int]float64{3: 1.5}, Cylinders: 5,
 		AmbientC: 12, CoolantMaxC: 90, Speedup: 1, Latency: 30 * time.Millisecond,
 	}
 }
@@ -44,7 +53,8 @@ func Volvo() Car {
 func Citroen() Car {
 	return Car{
 		VIN: "VF7LC9HZC12345678", CAN: false,
-		PIDs:     []byte{0x01, 0x04, 0x05, 0x06, 0x07, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x11, 0x13, 0x14, 0x15, 0x1C, 0x20},
+		PIDs: []byte{0x01, 0x03, 0x04, 0x05, 0x06, 0x07, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x11, 0x13, 0x14, 0x15, 0x1C, 0x20, 0x21, 0x2F, 0x30, 0x31, 0x33},
+		DTCs: []string{"P0420"}, Permanent: []string{"P0420"}, Cylinders: 4,
 		AmbientC: 12, CoolantMaxC: 88, Speedup: 1, Latency: 60 * time.Millisecond,
 	}
 }
@@ -138,11 +148,19 @@ func (a *Adapter) handle(cmd string) string {
 		return a.dtcResponse(0x43, a.car.DTCs)
 	case cmd == "07":
 		return a.dtcResponse(0x47, a.car.Pending)
+	case cmd == "0A":
+		return a.dtcResponse(0x4A, a.car.Permanent)
 	case cmd == "04":
 		a.car.DTCs, a.car.Pending, a.cleared = nil, nil, true
 		return a.hex([]byte{0x44})
 	case cmd == "0902":
 		return a.vinResponse()
+	case strings.HasPrefix(cmd, "09") && len(cmd) == 4:
+		return a.mode09(cmd[2:])
+	case strings.HasPrefix(cmd, "06") && len(cmd) == 4 && a.car.CAN:
+		return a.mode06(cmd[2:])
+	case strings.HasPrefix(cmd, "02") && len(cmd) == 6:
+		return a.mode02(cmd[2:4])
 	case strings.HasPrefix(cmd, "01") && len(cmd) == 4:
 		var pid byte
 		if _, err := fmt.Sscanf(cmd[2:], "%02X", &pid); err != nil {
@@ -172,18 +190,7 @@ func (a *Adapter) supported(pid byte) bool { return slices.Contains(a.car.PIDs, 
 
 func (a *Adapter) mode01(pid byte) ([]byte, bool) {
 	if pid%0x20 == 0 { // supported-PID bitmap
-		var bits uint32
-		any := false
-		for _, p := range a.car.PIDs {
-			if p > pid && p <= pid+0x20 {
-				bits |= 1 << (32 - int(p-pid))
-				any = true
-			}
-		}
-		if !any && pid != 0 {
-			return nil, false
-		}
-		return []byte{byte(bits >> 24), byte(bits >> 16), byte(bits >> 8), byte(bits)}, true
+		return bitmap(a.car.PIDs, pid)
 	}
 	if !a.supported(pid) {
 		return nil, false
@@ -237,11 +244,214 @@ func (a *Adapter) mode01(pid byte) ([]byte, bool) {
 		return []byte{0x06}, true // EOBD
 	case 0x42:
 		return u16(s.voltage * 1000), true
+	case 0x03:
+		if s.coolant < 40 {
+			return []byte{1, 0}, true // open loop while cold
+		}
+		return []byte{2, 0}, true
+	case 0x1F:
+		return u16(s.t), true
+	case 0x21:
+		return u16(0), true
+	case 0x2F:
+		return []byte{u8((62 - s.t/600) * 255 / 100)}, true
+	case 0x30:
+		return []byte{23}, true
+	case 0x31:
+		return u16(1840 + s.distanceKm), true
+	case 0x33:
+		return []byte{101}, true
+	case 0x3C:
+		return u16((s.catC + 40) * 10), true
+	case 0x41:
+		d := byte(0x65) // most monitors haven't run yet this drive cycle
+		if s.t > 600 {
+			d = 0x04
+		}
+		return []byte{0, 0x07, 0x65, d}, true
+	case 0x43:
+		return u16(s.load * 255 / 100), true
+	case 0x44:
+		lambda := 1.0
+		if s.coolant < 40 {
+			lambda = 0.95 // enriched while cold
+		}
+		return u16(lambda * 65536 / 2), true
+	case 0x46:
+		return []byte{u8(a.car.AmbientC + 40)}, true
+	case 0x49:
+		return []byte{u8((s.throttle*0.8 + 15) * 255 / 100)}, true
+	case 0x4C:
+		return []byte{u8(s.throttle * 255 / 100)}, true
+	case 0x51:
+		return []byte{1}, true // gasoline
 	}
-	return []byte{0x00}, true
+	return make([]byte, pidBytes[pid]), true
+}
+
+// pidBytes is each PID's data length, for PIDs the simulator reports as
+// zeros.
+var pidBytes = func() map[byte]int {
+	m := map[byte]int{}
+	for _, g := range obd.Groups(obd.All) {
+		m[g.Code] = g.Bytes
+	}
+	return m
+}()
+
+// bitmap answers a supported-PID request for base from the set ps, which
+// must include base+0x20 to chain to the next bitmap.
+func bitmap(ps []byte, base byte) ([]byte, bool) {
+	var bits uint32
+	any := false
+	for _, p := range ps {
+		if p > base && int(p) <= int(base)+0x20 {
+			bits |= 1 << (32 - int(p-base))
+			any = true
+		}
+	}
+	if !any && base != 0 {
+		return nil, false
+	}
+	return []byte{byte(bits >> 24), byte(bits >> 16), byte(bits >> 8), byte(bits)}, true
+}
+
+// mode02 answers freeze frame 0 requests ("02 pid 00"). The frame holds the
+// first stored DTC and the values at the moment of the request.
+func (a *Adapter) mode02(pidHex string) string {
+	var pid byte
+	if _, err := fmt.Sscanf(pidHex, "%02X", &pid); err != nil {
+		return "?"
+	}
+	if len(a.car.DTCs) == 0 {
+		return "NO DATA"
+	}
+	var data []byte
+	switch {
+	case pid == 0x02:
+		data = encodeDTC(a.car.DTCs[0])
+	case pid%0x20 == 0:
+		ps := append([]byte{0x02}, a.car.PIDs...)
+		d, ok := bitmap(ps, pid)
+		if !ok {
+			return "NO DATA"
+		}
+		data = d
+	case pid == 0x01 || pid == 0x41:
+		return "NO DATA"
+	default:
+		d, ok := a.mode01(pid)
+		if !ok {
+			return "NO DATA"
+		}
+		data = d
+	}
+	return a.hex(append([]byte{0x42, pid, 0x00}, data...))
+}
+
+// mode09 answers vehicle information requests besides the VIN.
+func (a *Adapter) mode09(pidHex string) string {
+	var pid byte
+	if _, err := fmt.Sscanf(pidHex, "%02X", &pid); err != nil {
+		return "?"
+	}
+	var count byte = 1
+	var data []byte
+	switch pid {
+	case 0x00:
+		bm, _ := bitmap([]byte{0x02, 0x04, 0x06, 0x08, 0x0A}, 0)
+		if !a.car.CAN {
+			return a.hex(append([]byte{0x49, 0x00, 0x01}, bm...))
+		}
+		return a.hex(append([]byte{0x49, 0x00}, bm...))
+	case 0x04:
+		data = append([]byte("SIMCAL-"+a.car.VIN[:9]), make([]byte, 16)...)[:16]
+	case 0x06:
+		data = []byte{0x1A, 0x2B, 0x3C, 0x4D}
+	case 0x08:
+		counters := []int{120, 410, 98, 120, 0, 0, 104, 120, 0, 0, 87, 120, 0, 0, 41, 120, 101, 120, 0, 0}
+		count = byte(len(counters))
+		for _, c := range counters {
+			data = append(data, byte(c>>8), byte(c))
+		}
+	case 0x0A:
+		data = append([]byte("ECM\x00-EngineControl"), make([]byte, 20)...)[:20]
+	default:
+		return "NO DATA"
+	}
+	if a.car.CAN {
+		payload := append([]byte{0x49, pid, count}, data...)
+		if len(payload) <= 7 {
+			return a.hex(payload)
+		}
+		return a.multiFrame(payload)
+	}
+	var lines []string
+	for i := 0; i < len(data); i += 4 {
+		chunk := make([]byte, 4)
+		copy(chunk, data[i:])
+		lines = append(lines, a.hex(append([]byte{0x49, pid, byte(i/4 + 1)}, chunk...)))
+	}
+	return strings.Join(lines, "\r")
+}
+
+// mode06 answers on-board monitor test requests (CAN format): an O2
+// sensor, the catalyst and the misfire monitors.
+func (a *Adapter) mode06(midHex string) string {
+	var mid byte
+	if _, err := fmt.Sscanf(midHex, "%02X", &mid); err != nil {
+		return "?"
+	}
+	mids := []byte{0x01, 0x20, 0x21, 0x40, 0x60, 0x80, 0xA0, 0xA1}
+	for c := range a.car.Cylinders {
+		mids = append(mids, byte(0xA2+c))
+	}
+	if mid%0x20 == 0 {
+		bm, ok := bitmap(mids, mid)
+		if !ok {
+			return "NO DATA"
+		}
+		return a.hex(append([]byte{0x46, mid}, bm...))
+	}
+	if !slices.Contains(mids, mid) {
+		return "NO DATA"
+	}
+	minutes := a.state().t / 60
+	rec := func(tid, uas byte, v, lo, hi float64) []byte {
+		w := func(f float64) []byte {
+			n := uint16(math.Max(0, math.Min(65535, f)))
+			return []byte{byte(n >> 8), byte(n)}
+		}
+		out := []byte{mid, tid, uas}
+		out = append(out, w(v)...)
+		out = append(out, w(lo)...)
+		return append(out, w(hi)...)
+	}
+	var recs []byte
+	switch {
+	case mid == 0x01:
+		recs = append(rec(0x01, 0x0A, 450/0.122, 300/0.122, 600/0.122), rec(0x05, 0x10, 60, 0, 150)...)
+	case mid == 0x21:
+		recs = rec(0x80, 0x01, 180, 0, 300)
+	case mid == 0xA1:
+		total := 0.0
+		for _, r := range a.car.Misfires {
+			total += r * minutes
+		}
+		recs = append(rec(0x0B, 0x24, total/2, 0, 65535), rec(0x0C, 0x24, total, 0, 65535)...)
+	default:
+		n := a.car.Misfires[int(mid-0xA1)] * minutes
+		recs = append(rec(0x0B, 0x24, n/2, 0, 65535), rec(0x0C, 0x24, n, 0, 65535)...)
+	}
+	payload := append([]byte{0x46}, recs...)
+	if len(payload) <= 7 {
+		return a.hex(payload)
+	}
+	return a.multiFrame(payload)
 }
 
 type state struct {
+	t, distanceKm, catC                                                                 float64
 	rpm, speed, load, throttle, maf, mapKPa, coolant, intake, stft, timing, o2, voltage float64
 }
 
@@ -292,6 +502,10 @@ func (a *Adapter) state() state {
 		s.o2 = 0.45 + 0.4*math.Sin(t*6)
 	}
 	s.voltage = 14.1 + n(0.05)
+	s.t = t
+	// Each 120 s cycle covers about 1.2 km after the first idle minute.
+	s.distanceKm = math.Max(0, t-60) / 100
+	s.catC = 200 + 450*(1-math.Exp(-t/300)) + s.load
 	return s
 }
 

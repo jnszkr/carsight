@@ -1,0 +1,570 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>carsight</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface-0: #f4f4f2;
+  --surface-1: #fcfcfb;
+  --border: #e3e2de;
+  --grid: #ecebe7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #7a7974;
+  --series-1: #2a78d6;
+  --series-1-fill: rgba(42, 120, 214, 0.08);
+  --hair: #8a8984;
+  --good: #0ca30c;
+  --critical: #d03b3b;
+  --warning: #fab219;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface-0: #121211;
+    --surface-1: #1a1a19;
+    --border: #2e2e2b;
+    --grid: #262624;
+    --text-primary: #f0efec;
+    --text-secondary: #c3c2b7;
+    --text-muted: #8f8e86;
+    --series-1: #3987e5;
+    --series-1-fill: rgba(57, 135, 229, 0.12);
+    --hair: #8f8e86;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-0: #121211;
+  --surface-1: #1a1a19;
+  --border: #2e2e2b;
+  --grid: #262624;
+  --text-primary: #f0efec;
+  --text-secondary: #c3c2b7;
+  --text-muted: #8f8e86;
+  --series-1: #3987e5;
+  --series-1-fill: rgba(57, 135, 229, 0.12);
+  --hair: #8f8e86;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--surface-0); color: var(--text-primary);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+a { color: inherit; }
+header {
+  display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+  border-bottom: 1px solid var(--border); background: var(--surface-1);
+}
+header .brand { font-weight: 650; text-decoration: none; letter-spacing: -0.01em; }
+header .crumb { color: var(--text-secondary); }
+main { max-width: 1400px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+.sub { color: var(--text-secondary); margin-top: 2px; }
+.muted { color: var(--text-muted); }
+.chip {
+  display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px;
+  border: 1px solid var(--border); color: var(--text-secondary); vertical-align: 2px;
+}
+.badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.badge .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); }
+.badge.live .dot { background: var(--good); animation: pulse 1.6s ease-in-out infinite; }
+.badge.lost .dot { background: var(--critical); }
+@keyframes pulse { 50% { opacity: 0.35; } }
+.head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.stats { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.stat {
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 12px; min-width: 110px;
+}
+.stat .k { font-size: 12px; color: var(--text-muted); }
+.stat .v { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.dtc { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.dtc .warn::before { content: "⚠ "; color: var(--warning); }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--surface-1); }
+.seg button, .btn {
+  font: inherit; font-size: 13px; padding: 4px 10px; border: 0; background: transparent;
+  color: var(--text-secondary); cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button[aria-pressed="true"] { background: var(--text-primary); color: var(--surface-1); }
+.btn { border: 1px solid var(--border); border-radius: 6px; background: var(--surface-1); }
+.btn[hidden], .seg[hidden] { display: none; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px 6px; min-width: 0; }
+.card .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.card .name { font-size: 13px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .val { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.card .val small { font-size: 12px; font-weight: 400; color: var(--text-muted); margin-left: 3px; }
+.card canvas { display: block; width: 100%; height: 130px; cursor: crosshair; touch-action: pan-y; }
+.empty { color: var(--text-muted); padding: 32px 0; text-align: center; }
+table { width: 100%; border-collapse: collapse; background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+th { font-size: 12px; font-weight: 600; color: var(--text-muted); }
+td.num { font-variant-numeric: tabular-nums; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: var(--surface-0); }
+tbody tr:last-child td { border-bottom: 0; }
+.notes { color: var(--text-secondary); max-width: 360px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.table-wrap { overflow-x: auto; }
+h2 { font-size: 15px; font-weight: 650; margin: 28px 0 10px; }
+.panels { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; align-items: start; }
+.panel { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 12px; min-width: 0; }
+.panel h3 { font-size: 13px; font-weight: 600; color: var(--text-secondary); margin: 0 0 8px; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; }
+.kv dt { color: var(--text-muted); }
+.kv dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.bars { display: grid; grid-template-columns: auto 1fr auto; gap: 6px 8px; align-items: center; font-size: 13px; }
+.bar { height: 10px; border-radius: 0 4px 4px 0; background: var(--series-1); min-width: 2px; }
+.ok::before { content: "✓ "; color: var(--good); }
+.bad::before { content: "✕ "; color: var(--critical); }
+.pend::before { content: "… "; color: var(--text-muted); }
+.panel table { border: 0; font-size: 13px; }
+.panel th, .panel td { padding: 4px 8px 4px 0; }
+.panel td.num { text-align: right; }
+details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
+@media (max-width: 600px) {
+  .grid { grid-template-columns: 1fr; }
+  .hide-sm { display: none; }
+}
+</style>
+</head>
+<body>
+<header>
+  <a class="brand" href="/">carsight</a>
+  <span class="crumb" id="crumb"></span>
+</header>
+<main id="main"></main>
+<script>
+"use strict";
+const $main = document.getElementById("main");
+const $crumb = document.getElementById("crumb");
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+
+function fmtDur(s) {
+  s = Math.max(0, Math.round(s));
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+  return h ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}` : `${m}:${String(sec).padStart(2, "0")}`;
+}
+function fmtVal(v) {
+  if (v == null || !isFinite(v)) return "–";
+  const a = Math.abs(v);
+  return a >= 100 ? v.toFixed(0) : a >= 10 ? v.toFixed(1) : v.toFixed(2);
+}
+const fmtDate = d => new Date(d).toLocaleString(undefined, {weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"});
+
+const m = location.pathname.match(/^\/drive\/(\d+)/);
+if (m) drivePage(+m[1]); else indexPage();
+
+// ---------- drive list ----------
+
+async function indexPage() {
+  $crumb.textContent = "Drives";
+  document.title = "Drives · carsight";
+  async function load() {
+    let data;
+    try { data = await (await fetch("/api/sessions")).json(); }
+    catch { return; }
+    const ss = data.sessions;
+    if (!ss.length) {
+      $main.innerHTML = `<div class="empty">No drives logged yet. Start one with <b>start_drive</b> or <b>carsight log</b>.</div>`;
+      return;
+    }
+    $main.innerHTML = `<div class="table-wrap"><table>
+      <thead><tr><th>Started</th><th>Vehicle</th><th>Type</th><th>Duration</th><th class="hide-sm">Notes</th><th></th></tr></thead>
+      <tbody>${ss.map(s => `<tr data-id="${s.id}">
+        <td><a href="/drive/${s.id}">${esc(fmtDate(s.started_at))}</a></td>
+        <td>${esc(s.vehicle || s.vin)}</td>
+        <td>${s.drive_type ? `<span class="chip">${esc(s.drive_type)}</span>` : ""}</td>
+        <td class="num">${s.duration_s ? fmtDur(s.duration_s) : "–"}</td>
+        <td class="notes hide-sm" title="${esc(s.notes)}">${esc(s.notes)}</td>
+        <td>${s.live ? `<span class="badge live"><span class="dot"></span>Live</span>` : ""}</td>
+      </tr>`).join("")}</tbody></table></div>`;
+    $main.querySelectorAll("tbody tr").forEach(tr => tr.onclick = e => {
+      if (e.target.tagName !== "A") location.href = `/drive/${tr.dataset.id}`;
+    });
+  }
+  await load();
+  // Pick up a drive that starts while the list is open.
+  setInterval(load, 5000);
+}
+
+// ---------- one drive ----------
+
+async function drivePage(id) {
+  $crumb.innerHTML = `<a href="/">Drives</a> / #${id}`;
+  // Subscribe before loading the stored samples so nothing falls in the gap;
+  // buffered readings newer than the stored ones are merged in afterwards.
+  let es = null, pending = [];
+  const first = await fetch(`/api/drives/${id}`);
+  if (!first.ok) { $main.innerHTML = `<div class="empty">${esc(await first.text())}</div>`; return; }
+  let data = await first.json();
+  if (data.session.live) {
+    es = new EventSource(`/api/drives/${id}/live`);
+    const buffer = e => pending.push(...JSON.parse(e.data));
+    es.addEventListener("samples", buffer);
+    es.buffer = buffer;
+    data = await (await fetch(`/api/drives/${id}`)).json();
+  }
+
+  const S = {
+    live: data.session.live,
+    lost: false,
+    series: {},        // name -> {t: [], v: []}
+    pids: data.pids,
+    windowS: 300,      // live view window; 0 = whole drive
+    zoom: null,        // replay zoom [t0, t1]
+    cursor: null,      // hovered time, seconds
+    status: data.status,
+  };
+  for (const p of data.pids) S.series[p.name] = data.series[p.name] || {t: [], v: []};
+  const lastT = () => Math.max(0, ...Object.values(S.series).map(s => s.t.length ? s.t[s.t.length - 1] : 0), S.status ? S.status.elapsed_s : 0);
+  function addRows(rows) {
+    for (const [pid, t, v] of rows) {
+      const s = S.series[pid];
+      if (!s) continue;
+      if (s.t.length && t <= s.t[s.t.length - 1]) continue;
+      s.t.push(t); s.v.push(v);
+    }
+  }
+
+  const sess = data.session;
+  const title = sess.vehicle || sess.vin;
+  document.title = `${title} · drive ${id} · carsight`;
+  $main.innerHTML = `
+    <div class="head">
+      <div>
+        <h1>${esc(title)} ${sess.drive_type ? `<span class="chip">${esc(sess.drive_type)}</span>` : ""}</h1>
+        <div class="sub">${esc(fmtDate(sess.started_at))} · VIN ${esc(sess.vin)}${sess.protocol ? " · " + esc(sess.protocol) : ""}</div>
+        ${sess.notes ? `<div class="sub">${esc(sess.notes)}</div>` : ""}
+      </div>
+      <span class="badge" id="badge"><span class="dot"></span><span id="badgeText"></span></span>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div class="controls">
+      <span class="seg" id="win" role="group" aria-label="Time window">
+        ${[[60, "1 min"], [300, "5 min"], [900, "15 min"], [0, "All"]].map(([s, l]) => `<button data-s="${s}">${l}</button>`).join("")}
+      </span>
+      <button class="btn" id="reset" hidden>Reset zoom</button>
+      <span class="muted" id="hint"></span>
+    </div>
+    <div class="grid" id="grid">${S.pids.map(p => `
+      <div class="card" data-pid="${p.name}">
+        <div class="top"><span class="name" title="${esc(p.desc)}">${esc(p.desc)}</span><span class="val"><span>–</span><small>${esc(p.unit)}</small></span></div>
+        <canvas aria-label="${esc(p.desc)} over time"></canvas>
+      </div>`).join("")}</div>
+    ${S.pids.length ? "" : `<div class="empty">No samples in this drive.</div>`}
+    <div id="info"></div>`;
+
+  const $badge = document.getElementById("badge"), $badgeText = document.getElementById("badgeText");
+  const $stats = document.getElementById("stats"), $win = document.getElementById("win");
+  const $reset = document.getElementById("reset"), $hint = document.getElementById("hint");
+  const cards = [...document.querySelectorAll(".card")].map(el => ({
+    el, pid: el.dataset.pid, canvas: el.querySelector("canvas"), val: el.querySelector(".val span"),
+  }));
+
+  const pidByName = Object.fromEntries(S.pids.map(p => [p.name, p]));
+
+  // Snapshot panels: what the car reported besides the live samples.
+  function renderInfo() {
+    const $info = document.getElementById("info");
+    const info = data.info;
+    if (!info || !info.start) {
+      $info.innerHTML = S.live ? `<h2>Snapshot</h2><div class="muted">Reading the full snapshot alongside the live data…</div>` : "";
+      return;
+    }
+    const st = info.start, en = info.end;
+    const unit = k => data.units[k] || "";
+    const show = (snap, k) => {
+      if (!snap || !(k in snap.values)) return "–";
+      return snap.labels && snap.labels[k] ? esc(snap.labels[k]) : `${fmtVal(snap.values[k])} <span class="muted">${esc(unit(k))}</span>`;
+    };
+    const kv = rows => `<dl class="kv">${rows.filter(r => r[1]).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>`;
+    const panels = [];
+
+    const vi = st.vehicle_info || {};
+    panels.push(`<div class="panel"><h3>Vehicle</h3>${kv([
+      ["OBD standard", st.labels && esc(st.labels.obd_standard)],
+      ["Fuel", st.labels && esc(st.labels.fuel_type)],
+      ["ECUs", vi.ecu_names && esc(vi.ecu_names.join(", "))],
+      ["Calibration", vi.calibration_ids && `<span class="mono">${esc(vi.calibration_ids.join(", "))}</span>`],
+      ["CVN", vi.cvns && `<span class="mono">${esc(vi.cvns.join(", "))}</span>`],
+      ["Since codes cleared", "distance_since_clear" in st.values ? `${fmtVal(st.values.distance_since_clear)} km, ${fmtVal(st.values.warmups_since_clear)} warm-ups` : ""],
+      ["Odometer", "odometer" in st.values ? `${fmtVal(st.values.odometer)} km` : ""],
+    ])}</div>`);
+
+    const mon = (r, title) => r ? `<div class="panel"><h3>${title}</h3>${kv(Object.keys(r.monitors).sort().map(k =>
+      [esc(k.replace(/_/g, " ")), `<span class="${r.monitors[k] === "complete" ? "ok" : "pend"}">${r.monitors[k]}</span>`]))}</div>` : "";
+    panels.push(mon(st.readiness, "Readiness monitors (since codes cleared)"));
+    panels.push(mon((en || st).monitors_this_drive_cycle, "Monitors this drive cycle"));
+
+    const ff = st.freeze_frame;
+    if (ff) panels.push(`<div class="panel"><h3>Freeze frame · <span class="dtc"><span class="warn">${esc(ff.dtc)}</span></span></h3>${kv(Object.keys(ff.values).sort().map(k =>
+      [esc(k), ff.labels && ff.labels[k] ? esc(ff.labels[k]) : `${fmtVal(ff.values[k])} <span class="muted">${esc(unit(k))}</span>`]))}</div>`);
+
+    // Misfires this drive cycle: the latest snapshot that has the monitor.
+    const tests = ((en && en.monitor_tests) || st.monitor_tests || []);
+    const mis = tests.filter(t => t.tid === "0C" && /^misfire cylinder/.test(t.monitor));
+    if (mis.length) {
+      const top = Math.max(1, ...mis.map(t => t.value));
+      panels.push(`<div class="panel"><h3>Misfires this drive cycle${en ? "" : " (at start)"}</h3><div class="bars">${mis.map(t => `
+        <span>${esc(t.monitor.replace("misfire ", ""))}</span>
+        <span><div class="bar" style="width:${t.value / top * 100}%"></div></span>
+        <span class="num">${fmtVal(t.value)}</span>`).join("")}</div></div>`);
+    }
+    if (tests.length) {
+      const failed = tests.filter(t => !t.pass);
+      panels.push(`<div class="panel"><h3>On-board monitor tests</h3>
+        <div class="${failed.length ? "bad" : "ok"}">${tests.length} results, ${failed.length} failed</div>
+        ${failed.map(t => `<div class="bad">${esc(t.monitor)} ${esc(t.test)}: ${t.value} (limits ${t.min}–${t.max} ${esc(t.unit)})</div>`).join("")}</div>`);
+    }
+
+    const keys = [...new Set([...Object.keys(st.values), ...Object.keys((en || {}).values || {})])].sort();
+    const errs = [...(st.errors || []), ...((en && en.errors) || [])];
+    $info.innerHTML = `<h2>Snapshot</h2><div class="panels">${panels.join("")}</div>
+      <h2>Every value at the start${en ? " and end" : ""}</h2>
+      <div class="panel"><details ${keys.length <= 30 ? "open" : ""}><summary>${keys.length} values</summary>
+        <div class="table-wrap"><table><thead><tr><th>PID</th><th class="num">Start</th>${en ? `<th class="num">End</th>` : ""}</tr></thead><tbody>
+        ${keys.map(k => `<tr><td>${esc(k)}</td><td class="num">${show(st, k)}</td>${en ? `<td class="num">${show(en, k)}</td>` : ""}</tr>`).join("")}
+        </tbody></table></div>
+        ${st.undecoded_pids ? `<div class="muted">Not decoded: ${Object.entries(st.undecoded_pids).map(([k, v]) => `<span class="mono">${k}=${v}</span>`).join(" ")}</div>` : ""}
+        ${errs.length ? `<div class="muted">Not available: ${errs.map(esc).join("; ")}</div>` : ""}
+      </details></div>`;
+  }
+  async function refreshInfo() {
+    try {
+      const d = await (await fetch(`/api/drives/${id}`)).json();
+      data.info = d.info; data.dtcs = d.dtcs;
+      renderInfo(); renderHeader();
+    } catch {}
+  }
+
+  function renderHeader() {
+    $badge.className = "badge" + (S.live ? " live" : S.lost ? " lost" : "");
+    $badgeText.textContent = S.live ? "Live" : S.lost ? "Connection lost" : "Saved";
+    $win.hidden = !S.live;
+    $reset.hidden = S.live || !S.zoom;
+    $hint.textContent = S.live ? "" : "Drag across a chart to zoom";
+    const st = S.status;
+    const dur = st ? st.elapsed_s : sess.duration_s || lastT();
+    const n = Object.values(S.series).reduce((a, s) => a + s.t.length, 0);
+    const stored = new Set(data.dtcs.filter(d => d.kind === "stored").map(d => d.code));
+    const pend = new Set(data.dtcs.filter(d => d.kind === "pending").map(d => d.code));
+    const perm = new Set(data.dtcs.filter(d => d.kind === "permanent").map(d => d.code));
+    if (st) {
+      st.stored_dtcs.forEach(c => stored.add(c)); st.pending_dtcs.forEach(c => pend.add(c));
+      (st.permanent_dtcs || []).forEach(c => perm.add(c));
+    }
+    const codes = set => set.size ? `<span class="dtc">${[...set].map(c => `<span class="warn">${esc(c)}</span>`).join(" ")}</span>` : `<span class="muted">none</span>`;
+    const items = [
+      ["Duration", fmtDur(dur)],
+      ["Samples", (st ? st.samples : n).toLocaleString()],
+    ];
+    if (st) items.push(["Polling", `${st.cycles_per_s} /s`], ["Read errors", st.read_errors]);
+    items.push(["Stored DTCs", codes(stored)], ["Pending DTCs", codes(pend)], ["Permanent DTCs", codes(perm)]);
+    if (st && st.phase === "final snapshot") items.push(["Saving", "final snapshot…"]);
+    if (st && st.stop_reason) items.push(["Stopped", esc(st.stop_reason)]);
+    $stats.innerHTML = items.map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+  }
+
+  $win.onclick = e => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    S.windowS = +b.dataset.s;
+    [...$win.children].forEach(x => x.setAttribute("aria-pressed", x === b));
+    dirty();
+  };
+  [...$win.children].forEach(x => x.setAttribute("aria-pressed", +x.dataset.s === S.windowS));
+  $reset.onclick = () => { S.zoom = null; renderHeader(); dirty(); };
+
+  // Visible time range shared by all charts.
+  function domain() {
+    const end = Math.max(lastT(), 1);
+    if (S.live) return S.windowS ? [Math.max(0, end - S.windowS), Math.max(end, S.windowS)] : [0, end];
+    return S.zoom || [0, end];
+  }
+
+  // Index of the last point at or before t.
+  function bisect(arr, t) {
+    let lo = 0, hi = arr.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] <= t) lo = mid + 1; else hi = mid; }
+    return lo - 1;
+  }
+  function valueAt(s, t) {
+    const i = bisect(s.t, t);
+    if (i < 0) return s.v.length ? s.v[0] : null;
+    // Snap to the nearer neighbour.
+    if (i + 1 < s.t.length && s.t[i + 1] - t < t - s.t[i]) return s.v[i + 1];
+    return s.v[i];
+  }
+
+  function niceTicks(lo, hi, n) {
+    const span = hi - lo || 1, raw = span / n, mag = 10 ** Math.floor(Math.log10(raw));
+    const step = [1, 2, 2.5, 5, 10].map(f => f * mag).find(s => s >= raw);
+    const out = [];
+    for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-9; v += step) out.push(+v.toFixed(10));
+    return out;
+  }
+  function timeTicks(t0, t1, n) {
+    const raw = (t1 - t0) / n;
+    const step = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200].find(s => s >= raw) || 7200;
+    const out = [];
+    for (let v = Math.ceil(t0 / step) * step; v <= t1; v += step) out.push(v);
+    return out;
+  }
+
+  const css = () => getComputedStyle(document.documentElement);
+  const PAD = {l: 40, r: 8, t: 6, b: 18};
+  let drag = null;
+
+  function draw(card) {
+    const c = card.canvas, s = S.series[card.pid];
+    const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+    if (!w) return;
+    if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
+    const g = c.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    const st = css(), col = n => st.getPropertyValue(n).trim();
+    const [t0, t1] = domain();
+    const pw = w - PAD.l - PAD.r, ph = h - PAD.t - PAD.b;
+    const X = t => PAD.l + (t - t0) / (t1 - t0) * pw;
+
+    // Visible slice, with one point either side so the line reaches the edges.
+    const i0 = Math.max(0, bisect(s.t, t0)), i1 = Math.min(s.t.length - 1, bisect(s.t, t1) + 1);
+    let lo = Infinity, hi = -Infinity;
+    for (let i = i0; i <= i1; i++) { if (s.v[i] < lo) lo = s.v[i]; if (s.v[i] > hi) hi = s.v[i]; }
+    if (!isFinite(lo)) { lo = 0; hi = 1; }
+    if (hi - lo < 1e-6) { lo -= 1; hi += 1; }
+    const padY = (hi - lo) * 0.08; lo -= padY; hi += padY;
+    const yt = niceTicks(lo, hi, 3);
+    lo = Math.min(lo, yt[0]); hi = Math.max(hi, yt[yt.length - 1]);
+    const Y = v => PAD.t + (1 - (v - lo) / (hi - lo)) * ph;
+
+    g.font = "11px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+    g.lineWidth = 1;
+    g.textBaseline = "middle"; g.textAlign = "right";
+    for (const v of yt) {
+      const y = Math.round(Y(v)) + 0.5;
+      g.strokeStyle = col("--grid"); g.beginPath(); g.moveTo(PAD.l, y); g.lineTo(w - PAD.r, y); g.stroke();
+      g.fillStyle = col("--text-muted"); g.fillText(fmtVal(v), PAD.l - 6, y);
+    }
+    g.textBaseline = "top"; g.textAlign = "center";
+    for (const t of timeTicks(t0, t1, Math.max(2, Math.floor(pw / 80)))) {
+      // Keep edge labels inside the canvas.
+      const label = fmtDur(t), half = g.measureText(label).width / 2;
+      g.fillStyle = col("--text-muted"); g.fillText(label, Math.min(w - half - 1, Math.max(half, X(t))), h - PAD.b + 4);
+    }
+
+    // Line, reduced to min/max per pixel column when points are dense.
+    g.save();
+    g.beginPath(); g.rect(PAD.l, 0, pw, h); g.clip();
+    g.strokeStyle = col("--series-1"); g.lineWidth = 2; g.lineJoin = "round"; g.lineCap = "round";
+    g.beginPath();
+    let px = null, mn = 0, mx = 0, started = false;
+    const flush = () => {
+      if (px == null) return;
+      if (!started) { g.moveTo(px, Y(mn)); started = true; }
+      g.lineTo(px, Y(mn)); if (mx !== mn) g.lineTo(px, Y(mx));
+    };
+    const dense = (i1 - i0) > pw * 2;
+    for (let i = i0; i <= i1; i++) {
+      const x = X(s.t[i]), v = s.v[i];
+      if (!dense) { if (!started) { g.moveTo(x, Y(v)); started = true; } else g.lineTo(x, Y(v)); continue; }
+      const col_ = Math.round(x);
+      if (col_ !== px) { flush(); px = col_; mn = mx = v; } else { if (v < mn) mn = v; if (v > mx) mx = v; }
+    }
+    if (dense) flush();
+    g.stroke();
+    g.restore();
+
+    // Drag-to-zoom selection.
+    if (drag && drag.x1 != null) {
+      g.fillStyle = col("--series-1-fill");
+      const a = Math.max(PAD.l, Math.min(drag.x0, drag.x1)), b = Math.min(w - PAD.r, Math.max(drag.x0, drag.x1));
+      g.fillRect(a, PAD.t, b - a, ph);
+    }
+
+    // Crosshair.
+    if (S.cursor != null && S.cursor >= t0 && S.cursor <= t1 && s.t.length) {
+      const x = Math.round(X(S.cursor)) + 0.5, v = valueAt(s, S.cursor);
+      g.strokeStyle = col("--hair"); g.lineWidth = 1;
+      g.beginPath(); g.moveTo(x, PAD.t); g.lineTo(x, PAD.t + ph); g.stroke();
+      if (v != null) {
+        g.fillStyle = col("--series-1"); g.strokeStyle = col("--surface-1"); g.lineWidth = 2;
+        g.beginPath(); g.arc(X(S.cursor), Y(v), 4, 0, Math.PI * 2); g.fill(); g.stroke();
+      }
+    }
+
+    // Headline value: at the cursor, else the latest reading.
+    const v = S.cursor != null ? valueAt(s, S.cursor) : s.v[s.v.length - 1];
+    const p = pidByName[card.pid];
+    card.val.textContent = p.labels && v != null && p.labels[v] ? p.labels[v] : fmtVal(v);
+  }
+
+  let raf = 0;
+  function dirty() { if (!raf) raf = requestAnimationFrame(() => { raf = 0; cards.forEach(draw); }); }
+  new ResizeObserver(dirty).observe(document.getElementById("grid"));
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", dirty);
+
+  const timeAt = (card, clientX) => {
+    const r = card.canvas.getBoundingClientRect(), [t0, t1] = domain();
+    const f = (clientX - r.left - PAD.l) / (r.width - PAD.l - PAD.r);
+    return t0 + Math.min(1, Math.max(0, f)) * (t1 - t0);
+  };
+  for (const card of cards) {
+    const c = card.canvas;
+    c.addEventListener("pointermove", e => {
+      S.cursor = timeAt(card, e.clientX);
+      if (drag && drag.card === card) drag.x1 = e.clientX - c.getBoundingClientRect().left;
+      dirty();
+    });
+    c.addEventListener("pointerleave", () => { S.cursor = null; dirty(); });
+    c.addEventListener("pointerdown", e => {
+      if (S.live || e.pointerType === "touch") return;
+      drag = {card, x0: e.clientX - c.getBoundingClientRect().left, t0: timeAt(card, e.clientX)};
+      c.setPointerCapture(e.pointerId);
+    });
+    c.addEventListener("pointerup", e => {
+      if (!drag) return;
+      const t1 = timeAt(card, e.clientX), a = Math.min(drag.t0, t1), b = Math.max(drag.t0, t1);
+      drag = null;
+      if (b - a > 1) { S.zoom = [a, b]; renderHeader(); }
+      dirty();
+    });
+    c.addEventListener("dblclick", () => { if (!S.live) { S.zoom = null; renderHeader(); dirty(); } });
+  }
+
+  renderHeader();
+  renderInfo();
+  dirty();
+
+  if (es) {
+    es.removeEventListener("samples", es.buffer);
+    addRows(pending); pending = null;
+    es.addEventListener("samples", e => { addRows(JSON.parse(e.data)); dirty(); });
+    es.addEventListener("status", e => {
+      const was = S.status && S.status.snapshot_done;
+      S.status = JSON.parse(e.data); renderHeader(); dirty();
+      if (S.status.snapshot_done && !was) refreshInfo();
+    });
+    es.addEventListener("end", e => {
+      S.status = JSON.parse(e.data); S.live = false; es.close();
+      renderHeader(); dirty(); refreshInfo();
+    });
+    es.onerror = () => {
+      if (!S.live) return;
+      // The server went away (the AI client exited, which also stops logging).
+      es.close(); S.live = false; S.lost = true;
+      renderHeader(); dirty();
+    };
+  }
+}
+</script>
+</body>
+</html>

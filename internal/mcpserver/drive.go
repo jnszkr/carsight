@@ -85,12 +85,21 @@ func (s *Server) startDrive(ctx context.Context, _ *mcp.CallToolRequest, in star
 		return nil, nil, err
 	}
 	s.drive = d
-	return nil, d.Status(), nil
+	return nil, s.statusOut(d.Status(), ""), nil
 }
 
 type driveStatusOut struct {
 	*car.Status
-	Message string `json:"message,omitempty"`
+	DashboardURL string `json:"dashboard_url,omitempty"`
+	Message      string `json:"message,omitempty"`
+}
+
+func (s *Server) statusOut(st car.Status, msg string) driveStatusOut {
+	out := driveStatusOut{Status: &st, Message: msg}
+	if u, err := s.dashboardURL(fmt.Sprintf("/drive/%d", st.SessionID)); err == nil {
+		out.DashboardURL = u
+	}
+	return out
 }
 
 func (s *Server) driveStatus(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
@@ -100,8 +109,7 @@ func (s *Server) driveStatus(_ context.Context, _ *mcp.CallToolRequest, _ struct
 	if d == nil {
 		return nil, driveStatusOut{Message: "no drive has been logged since this server started; use start_drive"}, nil
 	}
-	st := d.Status()
-	return nil, driveStatusOut{Status: &st}, nil
+	return nil, s.statusOut(d.Status(), ""), nil
 }
 
 func (s *Server) stopDrive(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
@@ -110,13 +118,11 @@ func (s *Server) stopDrive(_ context.Context, _ *mcp.CallToolRequest, _ struct{}
 	d := s.running()
 	if d == nil {
 		if s.drive != nil {
-			st := s.drive.Status()
-			return nil, driveStatusOut{Status: &st, Message: "this drive had already stopped"}, nil
+			return nil, s.statusOut(s.drive.Status(), "this drive had already stopped"), nil
 		}
 		return nil, nil, errors.New("no drive is being logged")
 	}
-	st := d.Stop()
-	return nil, driveStatusOut{Status: &st}, nil
+	return nil, s.statusOut(d.Stop(), ""), nil
 }
 
 type labelDriveIn struct {

@@ -63,6 +63,9 @@ SQLite (~/Library/Application Support/carsight/carsight.db)
       │
       ├── carsight report / trend / summary   ── Markdown or JSON on the command line
       │
+      ├── dashboard (http://127.0.0.1:7341)    ── live charts of the drive being logged,
+      │                                           replay of stored drives
+      │
       └── carsight mcp    ── MCP server (stdio): any AI assistant scans the car,
                              starts and stops drives, and queries summaries,
                              baselines, trends and raw samples
@@ -86,6 +89,7 @@ This puts a single `carsight` binary in `$(go env GOPATH)/bin`. All commands sha
 carsight scan | log | clear-dtcs        talk to the car
 carsight sessions | report | trend | summary   look at logged data
 carsight mcp                            serve carsight to an AI assistant
+carsight dashboard                      browse logged drives in the web dashboard
 ```
 
 `carsight <command> -h` lists each command's flags.
@@ -96,15 +100,23 @@ Plug in the vLinker, turn the ignition on, then:
 
 ```bash
 carsight scan                                           # protocol, VIN, supported PIDs, DTCs, readiness
-carsight log -name "Volvo V70" -type commute   # log until Ctrl-C
+carsight log -name "Volvo V70" -type commute   # log until Ctrl-C; prints the live dashboard link
 carsight clear-dtcs                                     # asks for confirmation
 ```
 
-`-port auto` (the default) picks the first `/dev/tty.usbserial-*`; the baud rate is auto-detected. Fast PIDs (RPM, speed, load, throttle, MAF/MAP, STFT, timing, O2) are polled every cycle and slow ones (temperatures, LTFT, voltage) every `-slow-every` cycles. On CAN, each request tells the adapter to expect a single answer so it returns without waiting for its timeout. VIN, DTCs (at start and end) and monitor readiness are stored once per session.
+`-port auto` (the default) picks the first `/dev/tty.usbserial-*`; the baud rate is auto-detected. carsight logs every standard PID the car supports (see [What carsight collects](#what-carsight-collects)). On CAN, each request tells the adapter to expect a single answer so it returns without waiting for its timeout.
 
 Each drive can carry a type (`-type`) and free-form notes (`-notes`). Suggested types: `cold_start`, `commute`, `city`, `highway`, `mixed`, `short_trip`, `idle_test`, `diagnostic` (others are allowed). Types let trends compare like with like: `carsight trend -type commute`.
 
 No car handy? `-port sim:volvo` or `-port sim:citroen` runs against a simulated adapter (CAN / KWP2000, with a warming engine and a stop-and-go drive). `-sim-speedup 30` compresses time, which also blurs PID-to-PID timing, so don't read too much into simulated idle figures.
+
+### Dashboard
+
+A local web page charts every logged PID. `carsight log` and the MCP `start_drive` tool start it with the drive and give its link (`http://127.0.0.1:7341/drive/<session>`). While the drive is being logged, the page streams readings as they arrive (server-sent events), with a 1/5/15-minute or whole-drive window. Stored drives open from the list at `/`. Drag across a chart to zoom and double-click to reset; the crosshair is synced across all charts. Below the charts, the snapshot panels show the vehicle and ECU information, readiness monitors, the freeze frame, misfires by cylinder, failed on-board tests, and every value at the start and end of the drive.
+
+`carsight log` stops its dashboard when it exits at the end of the drive, so use `carsight dashboard` to look at the drive afterwards. The MCP server keeps its dashboard running.
+
+`carsight dashboard` serves the stored drives on their own. The page listens on the loopback interface only, needs no internet connection, and falls back to a free port if 7341 is taken. `-dashboard addr` moves it and `-dashboard off` turns it off.
 
 ### Reports on the command line
 
@@ -136,7 +148,7 @@ or in an MCP client's JSON config (Claude Desktop, Cursor, …):
 }
 ```
 
-Claude Desktop doesn't use your shell's `PATH`, so give the binary's full path there. `carsight mcp` takes the same `-port`, `-baud` and `-sim-speedup` flags as `carsight log` to set the default adapter.
+Claude Desktop doesn't use your shell's `PATH`, so give the binary's full path there. `carsight mcp` takes the same `-port`, `-baud`, `-sim-speedup` and `-dashboard` flags as `carsight log` to set the default adapter and the dashboard's address.
 
 Then ask things like "start logging, it's a cold-start commute", "what's the coolant temperature now?", "stop logging and tell me how the drive went" or "are the Volvo's fuel trims drifting on highway drives?".
 
@@ -145,9 +157,10 @@ Car tools (need the adapter plugged in and the ignition on):
 | Tool | Does |
 |---|---|
 | `scan_car` | Protocol, VIN, supported PIDs, stored/pending DTCs, readiness; logs nothing |
-| `start_drive` | Starts logging in the background with a `drive_type`, `notes`, optional `vehicle_name` and `duration_min`; returns the new session at once |
+| `start_drive` | Starts logging in the background with a `drive_type`, `notes`, optional `vehicle_name` and `duration_min`; returns the new session and its `dashboard_url` at once |
 | `drive_status` | Live state: elapsed time, samples, polling rate, read errors, the latest value of each PID, DTCs seen |
 | `stop_drive` | Stops and saves the drive; returns the final status |
+| `open_dashboard` | Link to the dashboard for a drive (`session_id`) or the list of drives |
 | `label_drive` | Sets or corrects a drive's type and notes |
 | `clear_dtcs` | Clears DTCs, freeze frames and readiness (marked destructive; needs `confirm: true`, only on your explicit request) |
 
@@ -181,20 +194,37 @@ Good analysis depends on baselines: record several consistent drives per car (sa
 | `internal/store` | SQLite schema and queries |
 | `internal/analyze` | Drive summary, events, baseline comparison, trends, Markdown reports |
 | `internal/mcpserver` | MCP tools (car control and data) and prompts |
+| `internal/dashboard` | Local web dashboard: live drive over server-sent events, replay of stored drives |
 
-## Data to log (v1 PID set)
+## What carsight collects
 
-Keep the set small so the sample rate stays high (target ≥ 5 Hz per PID group):
+Everything the car reports over standard OBD-II (SAE J1979) that carsight can decode. `carsight scan` and the `scan_car` tool show what your car supports, and `describe_pids` lists every PID.
 
-- Engine RPM, vehicle speed, engine load
-- Coolant temperature, intake air temperature
-- MAF and/or MAP, throttle position
-- Short- and long-term fuel trims (bank 1)
-- Timing advance
-- O2 sensor voltages (if supported)
-- Control module voltage
+**Live samples.** All supported mode 01 PIDs are logged, about 100 in total including multi-sensor PIDs. The adapter answers one request at a time (roughly 20–60 ms each), so more PIDs mean fewer readings per second. Each PID therefore has a polling rate:
 
-Plus once per session: VIN, stored/pending DTCs, and the monitor readiness status.
+| Rate | Polled | Examples |
+|---|---|---|
+| fast | every cycle | RPM, speed, load, throttle, MAF, MAP, short-term trims, upstream O2 (narrow- or wide-band), timing, commanded lambda |
+| slow | each one about every `-slow-every` (5) cycles | coolant, intake and oil temperature, long-term trims, downstream O2, voltage, fuel system status (open/closed loop), catalyst temperature, pedal, gear, fuel rate, torque |
+| extra | each one about every `-extra-every` (30) cycles | fuel level, baro, ambient temperature, rail pressure, EGR, evap, distance and time since codes cleared, run time, odometer, other O2 sensors |
+| once | only in the snapshots | OBD standard, fuel type, O2 sensor layout, reference torque |
+
+Slow and extra PIDs are spread a few per cycle, so no cycle stalls on a long batch. A PID that fails five times in a row is dropped for the rest of the drive.
+
+**Snapshots at the start and end of each drive.** The start snapshot is read one request per cycle alongside the polling, so logging begins at once. The end snapshot is read after polling stops, which makes `stop_drive` take a few seconds. Each snapshot holds:
+
+- the current value of every supported PID, including the ones never polled, plus the raw bytes of any supported PID carsight can't decode
+- monitor readiness since codes were cleared (PID 01) and for this drive cycle (PID 41)
+- the freeze frame (mode 02): the trouble code that stored it and the values at the moment it was set
+- permanent DTCs (mode 0A), which clearing can't erase
+- vehicle information (mode 09, start only): calibration IDs, CVNs (checksums that change when an ECU is reflashed or tuned), ECU names, in-use performance counters
+- on-board monitor test results (mode 06, CAN only): each test's value, limits and pass/fail, including misfire counts per cylinder for the current drive cycle
+
+Stored and pending DTCs are also read at the start and end.
+
+The drive summary turns these into events: misfires by cylinder, failed monitor tests, permanent codes, a freeze frame, a fuel system fault, and codes cleared recently (under 100 km or 5 warm-ups ago, when readiness and stored codes may not show the whole picture).
+
+**Not collected.** Manufacturer-specific data (transmission temperature, ABS, airbag, body modules, per-cylinder timing) needs brand-specific commands such as FORScan's and isn't standard OBD-II. Mode 06 on pre-CAN cars uses a different format and is skipped.
 
 ## Roadmap
 
@@ -208,12 +238,14 @@ Implemented and tested against the built-in simulator; not yet verified on the r
 - [x] AI analysis through an MCP server (any assistant)
 - [x] Start, monitor and stop drives from the AI assistant; drive types
 - [x] Baseline per car + trend comparison across drives
+- [x] Local web dashboard: live drive over server-sent events, replay of stored drives
+- [x] Every standard PID the car supports, polled by rate; start/end snapshots with freeze frame, permanent DTCs, mode 09 vehicle info and mode 06 monitor tests
 
 Next:
 
 - [ ] Verify on the Volvo (CAN) and Citroën (K-line); tune thresholds from real baselines
 - [ ] Multi-PID requests on CAN to raise the sample rate
-- [ ] Optional: Bluetooth adapter / phone logging, PostgreSQL, web dashboard
+- [ ] Optional: Bluetooth adapter / phone logging, PostgreSQL
 - [ ] Optional: Volvo MS-CAN module data
 
 ## Out of scope (for now)

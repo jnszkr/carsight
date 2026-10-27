@@ -81,10 +81,13 @@ type Scan struct {
 	PendingDTCs []string       `json:"pending_dtcs"`
 	DTCErrors   []string       `json:"dtc_errors,omitempty"`
 	Readiness   *obd.Readiness `json:"readiness,omitempty"`
+	// Snapshot has every value the car reports, freeze frame, permanent
+	// DTCs, vehicle information and monitor test results.
+	Snapshot *obd.Snapshot `json:"snapshot"`
 }
 
-// Scan reads the VIN, supported PIDs, stored and pending DTCs and monitor
-// readiness.
+// Scan reads the VIN, supported PIDs, stored and pending DTCs, monitor
+// readiness and a full snapshot.
 func (c *Car) Scan(ctx context.Context) (Scan, error) {
 	s := Scan{Adapter: c.Desc, ELMVersion: c.Conn.Version, Protocol: c.Protocol(),
 		StoredDTCs: []string{}, PendingDTCs: []string{}, AllPIDs: []string{}}
@@ -116,9 +119,8 @@ func (c *Car) Scan(ctx context.Context) (Scan, error) {
 			s.StoredDTCs = append(s.StoredDTCs, codes...)
 		}
 	}
-	if r, err := c.Client.ReadReadiness(ctx); err == nil {
-		s.Readiness = &r
-	}
+	s.Snapshot = c.Client.TakeSnapshot(ctx, sup, true)
+	s.Readiness = s.Snapshot.Readiness
 	return s, nil
 }
 

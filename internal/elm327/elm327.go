@@ -51,10 +51,14 @@ func (p Protocol) String() string {
 // Conn is a connection to an ELM327 adapter. It is safe for use by one
 // goroutine at a time; calls are serialised internally.
 type Conn struct {
-	mu       sync.Mutex
-	rw       io.ReadWriter
-	r        *bufio.Reader
-	timeout  time.Duration
+	mu      sync.Mutex
+	rw      io.ReadWriter
+	r       *bufio.Reader
+	timeout time.Duration
+	// unsynced is set when a command gave up before the adapter's prompt
+	// (cancelled or timed out): its reply may still arrive and must not be
+	// taken for the next command's.
+	unsynced bool
 	Protocol Protocol
 	Version  string
 }
@@ -109,11 +113,20 @@ func (c *Conn) Command(ctx context.Context, cmd string) ([]string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.unsynced {
+		// Wait out the abandoned reply. Writing now would interrupt the
+		// adapter mid-command or leave its answer in the buffer.
+		if _, err := c.readUntilPrompt(context.WithoutCancel(ctx)); err != nil {
+			return nil, err
+		}
+		c.unsynced = false
+	}
 	if _, err := io.WriteString(c.rw, cmd+"\r"); err != nil {
 		return nil, fmt.Errorf("elm327: write: %w", err)
 	}
 	raw, err := c.readUntilPrompt(ctx)
 	if err != nil {
+		c.unsynced = true
 		return nil, err
 	}
 	return parseLines(cmd, raw)

@@ -1,9 +1,13 @@
 package mcpserver
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"math"
+	"net/http"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -70,7 +74,7 @@ func connect(t *testing.T, db *store.Store) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	ct, st := mcp.NewInMemoryTransports()
-	srv := New(db, Config{Version: "test", Adapter: car.Adapter{Port: "sim:volvo", SimSpeedup: 30}})
+	srv := New(db, Config{Version: "test", Adapter: car.Adapter{Port: "sim:volvo", SimSpeedup: 30}, Dashboard: "127.0.0.1:0"})
 	t.Cleanup(srv.Close)
 	if _, err := srv.MCP.Connect(ctx, st, nil); err != nil {
 		t.Fatal(err)
@@ -117,7 +121,7 @@ func TestTools(t *testing.T) {
 			t.Errorf("%s: read-only %v", tool.Name, ro)
 		}
 	}
-	if len(names) != 13 {
+	if len(names) != 14 {
 		t.Errorf("tools: %v", names)
 	}
 	clear := tools.Tools[slices.IndexFunc(tools.Tools, func(t *mcp.Tool) bool { return t.Name == "clear_dtcs" })]
@@ -203,7 +207,7 @@ func TestTools(t *testing.T) {
 
 	var desc describeOut
 	call(t, cs, "describe_pids", nil, &desc)
-	if len(desc.PIDs) != len(obd.Default) || desc.Metrics["ltft_warm_mean"] == "" {
+	if len(desc.PIDs) != len(obd.All) || desc.Metrics["ltft_warm_mean"] == "" {
 		t.Errorf("describe: %+v", desc)
 	}
 }
@@ -275,6 +279,7 @@ func TestDriveTools(t *testing.T) {
 	if st.Samples <= 50 || st.Latest["rpm"] == 0 {
 		t.Fatalf("status: %+v", st)
 	}
+	checkDashboard(t, cs, st.SessionID)
 
 	call(t, cs, "stop_drive", nil, &st)
 	if st.Running || st.StopReason != "stopped" {
@@ -286,9 +291,14 @@ func TestDriveTools(t *testing.T) {
 			DriveType   string `json:"drive_type"`
 			Vehicle     string `json:"vehicle"`
 			SampleCount int    `json:"sample_count"`
+			Snapshots   *obd.SessionInfo
 		}
 	}
 	call(t, cs, "get_drive_summary", nil, &drive)
+	if sn := drive.Drive.Snapshots; sn == nil || sn.Start == nil || sn.End == nil || sn.Start.VehicleInfo == nil ||
+		sn.Start.Labels["fuel_type"] != "gasoline" || sn.End.Values["coolant_temp"] == 0 {
+		t.Errorf("snapshots: %+v", sn)
+	}
 	if drive.Drive.SessionID != st.SessionID || drive.Drive.DriveType != "cold_start" || drive.Drive.Vehicle != "Volvo V70" {
 		t.Errorf("summary: %+v", drive)
 	}
@@ -306,8 +316,11 @@ func TestDriveTools(t *testing.T) {
 
 	// A timed drive stops by itself.
 	call(t, cs, "start_drive", map[string]any{"duration_min": 0.01}, &st)
-	time.Sleep(1500 * time.Millisecond)
-	call(t, cs, "drive_status", nil, &st)
+	// It then takes the end snapshot before it is saved.
+	for deadline := time.Now().Add(20 * time.Second); st.Running && time.Now().Before(deadline); {
+		time.Sleep(200 * time.Millisecond)
+		call(t, cs, "drive_status", nil, &st)
+	}
 	if st.Running || st.StopReason != "duration reached" {
 		t.Errorf("timed drive: %+v", st)
 	}
@@ -316,13 +329,69 @@ func TestDriveTools(t *testing.T) {
 	call(t, cs, "clear_dtcs", map[string]any{"confirm": true}, nil)
 }
 
+// checkDashboard follows the live drive's dashboard link: the page, the
+// stored samples so far, and live readings over server-sent events.
+func checkDashboard(t *testing.T, cs *mcp.ClientSession, id int64) {
+	t.Helper()
+	var out driveStatusOut
+	call(t, cs, "drive_status", nil, &out)
+	want := fmt.Sprintf("/drive/%d", id)
+	if !strings.HasPrefix(out.DashboardURL, "http://127.0.0.1:") || !strings.HasSuffix(out.DashboardURL, want) {
+		t.Fatalf("dashboard_url %q", out.DashboardURL)
+	}
+	base := strings.TrimSuffix(out.DashboardURL, want)
+	get := func(path string) *http.Response {
+		t.Helper()
+		resp, err := http.Get(base + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s: %s", path, resp.Status)
+		}
+		return resp
+	}
+	resp := get(want)
+	page, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(page), "EventSource") {
+		t.Error("page doesn't look like the dashboard")
+	}
+
+	var drive struct {
+		Session struct{ Live bool }
+		Series  map[string]struct{ T, V []float64 }
+	}
+	resp = get(fmt.Sprintf("/api/drives/%d", id))
+	err := json.NewDecoder(resp.Body).Decode(&drive)
+	resp.Body.Close()
+	// Samples reach the store every 2 s, so there may be none yet.
+	if _, ok := drive.Series["rpm"]; err != nil || !drive.Session.Live || !ok {
+		t.Errorf("drive: %+v %v", drive, err)
+	}
+
+	resp = get(fmt.Sprintf("/api/drives/%d/live", id))
+	defer resp.Body.Close()
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		if sc.Text() == "event: samples" && sc.Scan() {
+			var rows [][3]any
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(sc.Text(), "data: ")), &rows); err != nil || len(rows) == 0 {
+				t.Errorf("samples event %q: %v", sc.Text(), err)
+			}
+			return
+		}
+	}
+	t.Errorf("no samples event: %v", sc.Err())
+}
+
 func TestCloseSavesDrive(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	srv := New(db, Config{Adapter: car.Adapter{Port: "sim:citroen"}})
+	srv := New(db, Config{Adapter: car.Adapter{Port: "sim:citroen"}, Dashboard: "127.0.0.1:0"})
 	ct, st := mcp.NewInMemoryTransports()
 	ctx := context.Background()
 	if _, err := srv.MCP.Connect(ctx, st, nil); err != nil {
@@ -333,7 +402,11 @@ func TestCloseSavesDrive(t *testing.T) {
 		t.Fatal(err)
 	}
 	call(t, cs, "start_drive", nil, nil)
-	time.Sleep(500 * time.Millisecond)
+	var status car.Status
+	for deadline := time.Now().Add(10 * time.Second); status.Samples == 0 && time.Now().Before(deadline); {
+		time.Sleep(100 * time.Millisecond)
+		call(t, cs, "drive_status", nil, &status)
+	}
 	cs.Close()
 	srv.Close()
 	ss, err := db.Sessions(ctx, "", time.Time{}, time.Time{})

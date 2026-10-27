@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jnszkr/carsight/internal/obd"
@@ -52,6 +53,12 @@ type Summary struct {
 	DTCs        []DTCEntry         `json:"dtcs"`
 	Readiness   *obd.Readiness     `json:"readiness,omitempty"`
 	Metrics     map[string]float64 `json:"metrics"`
+	// Snapshots are the full state read at the start and end of the drive.
+	// Monitor tests are trimmed to failures and misfire counts.
+	Snapshots *obd.SessionInfo `json:"snapshots,omitempty"`
+	// Misfires is the misfire count per cylinder in the drive cycle, from
+	// the misfire monitor (mode 06), when the car reports it.
+	Misfires map[string]float64 `json:"misfires_by_cylinder,omitempty"`
 }
 
 // Duration marshals as seconds.
@@ -124,6 +131,13 @@ func Summarize(sess store.Session, veh store.Vehicle, samples []store.Sample, dt
 		var r obd.Readiness
 		if json.Unmarshal([]byte(sess.Readiness), &r) == nil {
 			sum.Readiness = &r
+		}
+	}
+
+	if sess.Info != "" {
+		var info obd.SessionInfo
+		if json.Unmarshal([]byte(sess.Info), &info) == nil {
+			sum.Snapshots = &info
 		}
 	}
 
@@ -281,8 +295,93 @@ func Summarize(sess store.Session, veh store.Vehicle, samples []store.Sample, dt
 	if sum.Readiness != nil && sum.Readiness.MIL {
 		sum.Events = append(sum.Events, Event{Kind: "mil_on", Severity: "high", Detail: "check engine light (MIL) is on"})
 	}
+	if fs := g["fuel_system"]; fs != nil {
+		for i, v := range fs.v {
+			if v == 8 || v == 16 {
+				sum.Events = append(sum.Events, Event{Kind: "fuel_system_fault", Severity: "warn", At: Duration(fs.t[i].Sub(sess.StartedAt)),
+					Detail: "fuel system reported " + obd.FuelSystemLabels[int(v)]})
+				break
+			}
+		}
+	}
+	sum.snapshotEvents()
 	sort.SliceStable(sum.Events, func(i, j int) bool { return sevRank(sum.Events[i].Severity) > sevRank(sum.Events[j].Severity) })
 	return sum
+}
+
+// ClearedRecentlyKm and ClearedRecentlyWarmups: below either, trouble
+// codes were cleared too recently for readiness and stored codes to tell
+// the whole story.
+const (
+	ClearedRecentlyKm      = 100
+	ClearedRecentlyWarmups = 5
+)
+
+// snapshotEvents flags what the start and end snapshots show and trims
+// their monitor tests to the ones worth reading.
+func (sum *Summary) snapshotEvents() {
+	info := sum.Snapshots
+	if info == nil {
+		return
+	}
+	if s := info.Start; s != nil {
+		km, okKm := s.Values["distance_since_clear"]
+		wu, okWu := s.Values["warmups_since_clear"]
+		if okKm && km < ClearedRecentlyKm || okWu && wu < ClearedRecentlyWarmups {
+			sum.Events = append(sum.Events, Event{Kind: "codes_cleared_recently", Severity: "info",
+				Detail: fmt.Sprintf("trouble codes were cleared recently (%.0f km, %.0f warm-ups ago); readiness and stored codes may not show the whole picture", km, wu)})
+		}
+		if ff := s.FreezeFrame; ff != nil {
+			var parts []string
+			for _, k := range []string{"rpm", "speed", "coolant_temp", "engine_load", "stft_b1", "ltft_b1"} {
+				if v, ok := ff.Values[k]; ok {
+					parts = append(parts, fmt.Sprintf("%s %.4g", k, v))
+				}
+			}
+			sum.Events = append(sum.Events, Event{Kind: "freeze_frame", Severity: "info",
+				Detail: fmt.Sprintf("freeze frame stored with %s: %s", ff.DTC, strings.Join(parts, ", "))})
+		}
+	}
+	// Misfire counts for the drive cycle: the end snapshot has the most.
+	for _, s := range []*obd.Snapshot{info.Start, info.End} {
+		if s == nil {
+			continue
+		}
+		for _, t := range s.MonitorTests {
+			if c := t.Cylinder(); c > 0 && t.TID == "0C" {
+				if sum.Misfires == nil {
+					sum.Misfires = map[string]float64{}
+				}
+				sum.Misfires[fmt.Sprint(c)] = t.Value
+			}
+		}
+	}
+	for c, n := range sum.Misfires {
+		if n > 0 {
+			sum.Events = append(sum.Events, Event{Kind: "misfire", Severity: "warn",
+				Detail: fmt.Sprintf("cylinder %s: %.0f misfires counted this drive cycle", c, n)})
+		}
+	}
+	seen := map[string]bool{}
+	for _, s := range []*obd.Snapshot{info.Start, info.End} {
+		if s == nil {
+			continue
+		}
+		var keep []obd.MonitorTest
+		for _, t := range s.MonitorTests {
+			if !t.Pass {
+				if k := t.MID + t.TID; !seen[k] {
+					seen[k] = true
+					sum.Events = append(sum.Events, Event{Kind: "monitor_test_failed", Severity: "warn",
+						Detail: fmt.Sprintf("on-board test failed: %s %s %g outside %g–%g %s", t.Monitor, t.Test, t.Value, t.Min, t.Max, t.Unit)})
+				}
+			}
+			if !t.Pass || t.Cylinder() > 0 && t.Value > 0 {
+				keep = append(keep, t)
+			}
+		}
+		s.MonitorTests = keep
+	}
 }
 
 func sevRank(s string) int {

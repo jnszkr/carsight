@@ -98,3 +98,19 @@ func TestDecodeResponse(t *testing.T) {
 		})
 	}
 }
+
+// A command abandoned before its prompt must not hand its reply to the
+// next command.
+func TestResyncAfterAbandonedCommand(t *testing.T) {
+	s := &scripted{replies: map[string]string{"0100": "41 00 BE 3F A8 13", "010D": "41 0D 32"}}
+	c := New(s)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.Command(ctx, "0100"); err == nil {
+		t.Fatal("cancelled command succeeded")
+	}
+	got, err := c.Request(context.Background(), "010D")
+	if err != nil || len(got) != 1 || !reflect.DeepEqual(got[0], []byte{0x41, 0x0D, 0x32}) {
+		t.Errorf("after resync: % X %v", got, err)
+	}
+}
