@@ -140,16 +140,16 @@ func TestCompareAndTrends(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := WriteReport(&buf, cur, deltas, "### Health summary\nTest."); err != nil {
+	if err := WriteReport(&buf, cur, deltas); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"# Drive 5: Test car", "## Analysis", "## Compared with baseline", "⚠"} {
+	for _, want := range []string{"# Drive 5: Test car", "## Findings", "## Compared with baseline", "⚠"} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("report missing %q:\n%s", want, buf.String())
 		}
 	}
 	buf.Reset()
-	if err := WriteTrendReport(&buf, "Test car", append(base, cur), trends, ""); err != nil {
+	if err := WriteTrendReport(&buf, "Test car", append(base, cur), trends); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "ltft_warm_mean") {

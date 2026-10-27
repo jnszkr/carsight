@@ -24,6 +24,23 @@ type Delta struct {
 	Flag   bool    `json:"flag"`
 }
 
+// MetricDescriptions explains the key metrics in Summary.Metrics, which
+// are what baselines and trends are computed from.
+var MetricDescriptions = map[string]string{
+	"warmup_to_75c_s":      "seconds from start to 75 °C coolant (cold starts only)",
+	"coolant_max_c":        "highest coolant temperature, °C",
+	"idle_rpm_mean":        "mean warm idle RPM",
+	"idle_rpm_std":         "std dev of warm idle RPM (idle stability)",
+	"idle_maf_gs":          "mean warm idle mass air flow, g/s",
+	"idle_timing_deg":      "mean warm idle timing advance, °",
+	"stft_warm_mean":       "mean short-term fuel trim bank 1 with a warm engine, %",
+	"ltft_warm_mean":       "mean long-term fuel trim bank 1 with a warm engine, %",
+	"trim_total_idle":      "mean STFT+LTFT at warm idle, % (positive = adding fuel / lean)",
+	"trim_total_cruise":    "mean STFT+LTFT moving at 20+ km/h with a warm engine, %",
+	"o2_b1s1_std":          "std dev of upstream O2 voltage when warm (low = not switching)",
+	"voltage_running_mean": "mean control module voltage with the engine running, V",
+}
+
 // minSpread keeps tiny baseline std devs (very consistent drives) from
 // turning trivial differences into large z-scores.
 var minSpread = map[string]float64{

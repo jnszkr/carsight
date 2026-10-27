@@ -9,9 +9,8 @@ import (
 	"github.com/jnszkr/carsight/internal/obd"
 )
 
-// WriteReport renders a Markdown report for one drive. aiAnalysis, if
-// non-empty, is included verbatim as its own section.
-func WriteReport(w io.Writer, s Summary, deltas []Delta, aiAnalysis string) error {
+// WriteReport renders a Markdown report for one drive.
+func WriteReport(w io.Writer, s Summary, deltas []Delta) error {
 	var b strings.Builder
 	title := s.Vehicle
 	if title == "" {
@@ -29,12 +28,6 @@ func WriteReport(w io.Writer, s Summary, deltas []Delta, aiAnalysis string) erro
 		fmt.Fprintf(&b, "- **Notes:** %s\n", s.Notes)
 	}
 	b.WriteString("\n")
-
-	if aiAnalysis != "" {
-		b.WriteString("## Analysis\n\n")
-		b.WriteString(strings.TrimSpace(aiAnalysis))
-		b.WriteString("\n\n")
-	}
 
 	b.WriteString("## Findings\n\n")
 	if len(s.Events) == 0 {
@@ -146,15 +139,12 @@ func WriteReport(w io.Writer, s Summary, deltas []Delta, aiAnalysis string) erro
 }
 
 // WriteTrendReport renders a Markdown report of metric trends across drives.
-func WriteTrendReport(w io.Writer, vehicle string, drives []Summary, trends []TrendLine, aiAnalysis string) error {
+func WriteTrendReport(w io.Writer, vehicle string, drives []Summary, trends []TrendLine) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Trends: %s\n\n", vehicle)
 	if len(drives) > 0 {
 		fmt.Fprintf(&b, "%d drives from %s to %s.\n\n", len(drives),
 			drives[0].Start.Local().Format("2006-01-02"), drives[len(drives)-1].Start.Local().Format("2006-01-02"))
-	}
-	if aiAnalysis != "" {
-		b.WriteString("## Analysis\n\n" + strings.TrimSpace(aiAnalysis) + "\n\n")
 	}
 	b.WriteString("## Metrics\n\n| Metric | n | First | Last | Mean | Slope / drive | Slope / 30 days |\n|---|---|---|---|---|---|---|\n")
 	for _, t := range trends {
