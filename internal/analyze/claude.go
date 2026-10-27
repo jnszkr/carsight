@@ -64,7 +64,7 @@ type Client struct {
 }
 
 // NewClient creates a client. Credentials are resolved by the SDK
-// (ANTHROPIC_API_KEY, or a profile from 'ant auth login').
+// (normally ANTHROPIC_API_KEY).
 func NewClient(opts ...option.RequestOption) *Client {
 	return &Client{api: anthropic.NewClient(opts...), Model: DefaultModel}
 }

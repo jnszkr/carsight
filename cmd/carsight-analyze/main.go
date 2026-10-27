@@ -32,7 +32,7 @@ func main() {
 		until     = flag.String("until", "", "trend: last day to include (YYYY-MM-DD)")
 		trend     = flag.Bool("trend", false, "write a trend report across drives instead of a single-drive report")
 		list      = flag.Bool("list", false, "list vehicles and sessions")
-		useAI     = flag.Bool("ai", false, "ask Claude to analyse the drive (needs ANTHROPIC_API_KEY or 'ant auth login')")
+		useAI     = flag.Bool("ai", false, "ask Claude to analyse the drive (needs ANTHROPIC_API_KEY)")
 		model     = flag.String("model", analyze.DefaultModel, "Claude model")
 		baselineN = flag.Int("baseline", 10, "number of earlier drives used as the baseline")
 		minDur    = flag.Duration("min-duration", 5*time.Minute, "ignore drives shorter than this for baselines and trends")

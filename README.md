@@ -111,7 +111,7 @@ No car handy? `-port sim:volvo` or `-port sim:citroen` runs against a simulated 
 
 A drive report has rule-based findings (overheating, slow warm-up, unstable idle, fuel trims beyond ±10%, inactive O2 sensor, charging voltage, DTCs, MIL), warm-engine figures, a comparison against the car's last `-baseline` drives (z-scores, flagged at |z| ≥ 2 once there are 3+ baseline drives), DTCs and readiness. Drives shorter than `-min-duration` (5 min) are left out of baselines and trends.
 
-`-ai` sends the compact summary (never raw samples) to Claude (`claude-opus-5-5` by default, `-model` to change) and adds its write-up to the report. Credentials come from `ANTHROPIC_API_KEY` or an `ant auth login` profile. Requests opt into server-side refusal fallback, so a safety-classifier decline is re-served by another model instead of failing.
+`-ai` sends the compact summary (never raw samples) to Claude (`claude-opus-5-5` by default, `-model` to change) and adds its write-up to the report. It needs an Anthropic API key from the [Claude Console](https://console.anthropic.com/settings/keys), exported as `ANTHROPIC_API_KEY` (API usage is billed separately from a Claude subscription; logging in to Claude Code doesn't provide a key). Requests opt into server-side refusal fallback, so a safety-classifier decline is re-served by another model instead of failing.
 
 ### Layout
 
