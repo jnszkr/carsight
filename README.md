@@ -16,6 +16,32 @@ Read live data from our cars over OBD-II, store it, and use AI to analyse it: sp
 | **Vgate vLinker FS USB** | ELM327-compatible, FTDI USB serial, auto HS-CAN / MS-CAN switching |
 | Laptop | macOS (FTDI driver built in), shows up as `/dev/tty.usbserial-*` |
 
+### Adapter: Vgate vLinker FS USB
+
+Sold as "Made for FORScan", but it is a general OBD-II adapter that speaks the ELM327 command set, which is all carsight uses.
+
+| | |
+|---|---|
+| USB interface | FTDI virtual COM port (VCP) bridge. macOS ships the FTDI driver; on Windows it may need the [FTDI VCP driver](https://ftdichip.com/drivers/vcp-drivers/). |
+| Serial speed | Opens at **115200 baud** (FORScan's documented setting). The link can go up to **3 Mbaud** (FORScan's "auto-increase"), but each reading is limited by how fast the ECU answers, so carsight stays at 115200. `-baud 0` (default) tries 115200 first. |
+| Identification | Reports itself as e.g. `vLinker FS v2.2.58 MIC332X v2.0 (ELM327 v2.2)`. The logger prints the ELM327 version line from `ATZ` on connect. |
+| Buses | Automatic electronic HS-CAN / MS-CAN switching (no manual toggle switch). Standard engine data is on HS-CAN; MS-CAN only matters for Ford/Volvo body modules. |
+| Power | Safe on 12 V and 24 V systems. "Battery saver": goes into standby on its own and wakes when used, so it can stay plugged in. |
+| Buffers | 8192-byte serial buffer; requests up to 4128 bytes (long multi-frame messages). |
+| FEPS | Supplies the 18 V Ford programming voltage for ECU firmware flashing. carsight never uses it. |
+
+**LEDs:** plugged into the laptop only, the red LED flashes once and the blue LED stays on. Plugged into the car as well, blue and green stay on.
+
+**Connecting:**
+
+1. Plug the adapter into the laptop, then into the car's OBD-II port (under the dashboard, driver's side).
+2. Turn the ignition **on** (engine running for a drive log; engine off with ignition on for `clear-dtcs`). On push-button cars without a key, press Start twice without the brake for ignition-on.
+3. Run `./carsight-logger scan`. If no adapter is found, check that `ls /dev/tty.usbserial-* /dev/cu.usbserial-*` lists it, try another USB port, or pass the path with `-port`.
+
+**Firmware:** updates and the full user manual are on Vgate's [download centre](https://www.vgatemall.com/downloadcenter) (the updater is Windows-only). Vgate recommends firmware **v2.2.78 or newer** for cars from 2005 and earlier; neither of our cars is that old, but update if a K-line connection to the Citroën is unreliable.
+
+**FORScan:** the adapter's bundled guide is for FORScan (Windows, Ford/Mazda/Lincoln): Settings → Connection, type FTDI, baud 115.2 Kbps, auto-increase on. carsight doesn't need it. Only one program can hold the serial port at a time, so close other OBD apps before logging.
+
 ## Vehicles
 
 | Car | Year | Notes |
