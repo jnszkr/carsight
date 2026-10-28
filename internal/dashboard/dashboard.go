@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jnszkr/carsight/internal/analyze"
 	"github.com/jnszkr/carsight/internal/car"
 	"github.com/jnszkr/carsight/internal/obd"
 	"github.com/jnszkr/carsight/internal/store"
@@ -31,6 +32,14 @@ const DefaultAddr = "127.0.0.1:7341"
 
 // maxPoints caps the points per PID returned for a stored drive.
 const maxPoints = 4000
+
+// Baseline for a drive's analysis, as the MCP server uses: up to
+// baselineDrives earlier drives of the same car lasting at least
+// baselineMinDur.
+const (
+	baselineDrives = 10
+	baselineMinDur = 5 * time.Minute
+)
 
 // Server serves the dashboard.
 type Server struct {
@@ -114,6 +123,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sessions", s.sessions)
 	mux.HandleFunc("GET /api/drives/{id}", s.drive)
 	mux.HandleFunc("GET /api/drives/{id}/live", s.stream)
+	mux.HandleFunc("GET /api/drives/{id}/analysis", s.analysis)
 	return localOnly(mux)
 }
 
@@ -300,6 +310,25 @@ func (s *Server) drive(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, out)
+}
+
+// analysis is the drive summary and its comparison with the car's earlier
+// drives: what get_drive_summary gives an AI assistant.
+func (s *Server) analysis(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.sessionByID(w, r)
+	if !ok {
+		return
+	}
+	a, err := analyze.AnalyzeDrive(r.Context(), s.db, sess, baselineDrives, baselineMinDur)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	a.Drive.Snapshots = nil // the page already has them from /api/drives/{id}
+	writeJSON(w, struct {
+		analyze.DriveAnalysis
+		MetricDescriptions map[string]string `json:"metric_descriptions"`
+	}{a, analyze.MetricDescriptions})
 }
 
 // thin reduces a series to at most n points by keeping the minimum and

@@ -126,7 +126,15 @@ h2 { font-size: 15px; font-weight: 650; margin: 28px 0 10px; }
 .pend::before { content: "… "; color: var(--text-muted); }
 .panel table { border: 0; font-size: 13px; }
 .panel th, .panel td { padding: 4px 8px 4px 0; }
-.panel td.num { text-align: right; }
+.panel td.num, .panel th.num { text-align: right; }
+.findings { list-style: none; margin: 0; padding: 0; font-size: 13px; display: grid; gap: 4px; }
+.findings li[data-at] { cursor: pointer; }
+.findings li[data-at]:hover { text-decoration: underline; }
+.findings .at { color: var(--text-muted); font-variant-numeric: tabular-nums; margin-left: 4px; }
+.warn-i::before { content: "⚠ "; color: var(--warning); }
+.info-i::before { content: "ℹ "; color: var(--text-muted); }
+.panel td.flag { color: var(--critical); font-weight: 600; }
+.panel.wide { grid-column: 1 / -1; }
 details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
 @media (max-width: 600px) {
   .grid { grid-template-columns: 1fr; }
@@ -246,6 +254,7 @@ async function drivePage(id) {
       <span class="badge" id="badge"><span class="dot"></span><span id="badgeText"></span></span>
     </div>
     <div class="stats" id="stats"></div>
+    <div id="analysis"></div>
     <div class="controls">
       <span class="seg" id="win" role="group" aria-label="Time window">
         ${[[60, "1 min"], [300, "5 min"], [900, "15 min"], [0, "All"]].map(([s, l]) => `<button data-s="${s}">${l}</button>`).join("")}
@@ -336,6 +345,86 @@ async function drivePage(id) {
         ${errs.length ? `<div class="muted">Not available: ${errs.map(esc).join("; ")}</div>` : ""}
       </details></div>`;
   }
+  // Analysis: carsight's rule-based read of the saved drive, the same as an
+  // AI assistant gets from get_drive_summary.
+  async function loadAnalysis() {
+    const $a = document.getElementById("analysis");
+    if (S.live) {
+      $a.innerHTML = `<h2>Analysis</h2><div class="muted">Appears once the drive is saved.</div>`;
+      return;
+    }
+    let a;
+    try {
+      const r = await fetch(`/api/drives/${id}/analysis`);
+      if (!r.ok) throw new Error(await r.text());
+      a = await r.json();
+    } catch (err) {
+      $a.innerHTML = `<h2>Analysis</h2><div class="muted">Couldn't analyse this drive: ${esc(err.message)}</div>`;
+      return;
+    }
+    const d = a.drive, panels = [];
+    const kv = rows => `<dl class="kv">${rows.filter(r => r[1]).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>`;
+    const st = (x, unit) => x ? `${fmtVal(x.mean)} ${unit} <span class="muted">± ${fmtVal(x.std)} (${fmtVal(x.min)}–${fmtVal(x.max)})</span>` : "";
+    const pct = v => `${v > 0 ? "+" : ""}${fmtVal(v)} %`;
+
+    const order = {high: 0, warn: 1, info: 2};
+    const evs = [...d.events].sort((x, y) => order[x.severity] - order[y.severity] || x.at - y.at);
+    panels.push(`<div class="panel wide"><h3>Findings</h3>${evs.length ? `<ul class="findings">${evs.map(e => {
+      const timed = e.at > 0 || e.lasted > 0;
+      const cls = e.severity === "high" ? "bad" : e.severity === "warn" ? "warn-i" : "info-i";
+      return `<li class="${cls}"${timed ? ` data-at="${e.at}" data-lasted="${e.lasted}" title="Zoom the charts to this"` : ""}>${esc(e.detail)}${
+        timed ? `<span class="at">at ${fmtDur(e.at)}${e.lasted ? `, ${fmtDur(e.lasted)}` : ""}</span>` : ""}</li>`;
+    }).join("")}</ul>` : `<div class="ok">Nothing flagged</div>`}</div>`);
+
+    const w = d.warm_up;
+    panels.push(`<div class="panel"><h3>Drive</h3>${kv([
+      ["Distance", `${fmtVal(d.distance_km)} km`],
+      ["Coolant", w.max_c ? `${fmtVal(w.start_c)} → ${fmtVal(w.max_c)} °C` : ""],
+      ["Start", w.max_c ? (w.cold_start ? "cold (below 40 °C)" : "warm") : ""],
+      ["Reached 75 °C", w.max_c ? (w.reached_75c ? (w.cold_start && w.time_to_75c != null ? `after ${fmtDur(w.time_to_75c)}` : "yes") : "no") : ""],
+      ["RPM polled", d.rpm_sample_rate_hz ? `${fmtVal(d.rpm_sample_rate_hz)} /s` : ""],
+    ])}</div>`);
+
+    const i = d.idle;
+    panels.push(`<div class="panel"><h3>Warm idle</h3>${i ? kv([
+      ["Time at idle", fmtDur(i.seconds)],
+      ["RPM", st(i.rpm, "rpm")],
+      ["Air flow", st(i.maf, "g/s")],
+      ["Timing", st(i.timing_advance, "°")],
+    ]) : `<div class="muted">No warm, stationary idle in this drive.</div>`}</div>`);
+
+    const ft = d.fuel_trim;
+    if (ft) panels.push(`<div class="panel"><h3>Fuel trims (warm, bank 1)</h3>${kv([
+      ["Short term", st(ft.stft, "%")],
+      ["Long term", st(ft.ltft, "%")],
+      ["Total at idle", pct(ft.total_idle)],
+      ["Total at cruise", pct(ft.total_cruise)],
+    ])}<div class="muted">Positive means the ECU is adding fuel (running lean).</div></div>`);
+
+    if (d.voltage_running || d.o2_b1s1_warm) panels.push(`<div class="panel"><h3>Electrical and O2</h3>${kv([
+      ["Voltage running", st(d.voltage_running, "V")],
+      ["Upstream O2, warm", st(d.o2_b1s1_warm, "V")],
+    ])}</div>`);
+
+    const desc = a.metric_descriptions || {};
+    const base = a.baseline_deltas;
+    panels.push(`<div class="panel wide"><h3>Compared with earlier drives</h3>${base.length ? `
+      <div class="table-wrap"><table><thead><tr><th>Metric</th><th class="num">This drive</th><th class="num">Earlier drives</th><th class="num">z</th></tr></thead><tbody>
+      ${base.map(b => `<tr><td title="${esc(b.metric)}">${esc(desc[b.metric] || b.metric)}</td><td class="num">${fmtVal(b.value)}</td>
+        <td class="num">${fmtVal(b.baseline_mean)} <span class="muted">± ${fmtVal(b.baseline_std)}, ${b.baseline_n} drives</span></td>
+        <td class="num${b.flag ? " flag" : ""}">${b.z > 0 ? "+" : ""}${fmtVal(b.z)}</td></tr>`).join("")}
+      </tbody></table></div><div class="muted">z is how many standard deviations this drive is from the earlier ones; 2 or more is flagged once there are 3 earlier drives.</div>`
+      : `<div class="muted">No earlier drives of this car lasting 5 minutes or more to compare with.</div>`}</div>`);
+
+    $a.innerHTML = `<h2>Analysis</h2><div class="panels">${panels.join("")}</div>`;
+    $a.querySelectorAll("li[data-at]").forEach(li => li.onclick = () => {
+      const at = +li.dataset.at, lasted = +li.dataset.lasted, pad = Math.max(10, lasted * 0.2);
+      S.zoom = [Math.max(0, at - pad), Math.min(lastT(), at + lasted + pad)];
+      renderHeader(); dirty();
+      document.getElementById("grid").scrollIntoView({behavior: "smooth", block: "start"});
+    });
+  }
+
   async function refreshInfo() {
     try {
       const d = await (await fetch(`/api/drives/${id}`)).json();
@@ -542,6 +631,7 @@ async function drivePage(id) {
 
   renderHeader();
   renderInfo();
+  loadAnalysis();
   dirty();
 
   if (es) {
@@ -555,13 +645,13 @@ async function drivePage(id) {
     });
     es.addEventListener("end", e => {
       S.status = JSON.parse(e.data); S.live = false; es.close();
-      renderHeader(); dirty(); refreshInfo();
+      renderHeader(); dirty(); refreshInfo(); loadAnalysis();
     });
     es.onerror = () => {
       if (!S.live) return;
       // The server went away (the AI client exited, which also stops logging).
       es.close(); S.live = false; S.lost = true;
-      renderHeader(); dirty();
+      renderHeader(); dirty(); loadAnalysis();
     };
   }
 }
