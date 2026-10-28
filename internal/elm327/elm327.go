@@ -24,6 +24,22 @@ var (
 	ErrTimeout       = errors.New("elm327: timeout waiting for prompt")
 )
 
+// NegativeResponse is a negative response (7F, service, code) from the ECU:
+// it understood the request but won't answer it, usually because it doesn't
+// support the service. It matches ErrNoData.
+type NegativeResponse struct{ Service, Code byte }
+
+func (e *NegativeResponse) Error() string {
+	reasons := map[byte]string{0x11: "service not supported", 0x12: "sub-function not supported",
+		0x22: "conditions not correct", 0x31: "request out of range"}
+	if r, ok := reasons[e.Code]; ok {
+		return fmt.Sprintf("elm327: ECU refused service %02X: %s", e.Service, r)
+	}
+	return fmt.Sprintf("elm327: ECU refused service %02X: code %02X", e.Service, e.Code)
+}
+
+func (e *NegativeResponse) Is(target error) bool { return target == ErrNoData }
+
 // searchTimeout bounds the first request after ATSP. The adapter may try
 // every protocol in turn, and a K-line handshake (ISO 9141 or KWP2000 with
 // 5-baud init) alone can take several seconds.
@@ -65,15 +81,17 @@ type Conn struct {
 	// taken for the next command's. resync is how long to wait for it.
 	unsynced bool
 	resync   time.Duration
-	Protocol Protocol
-	Version  string
+	// retryWait is the pause before retrying a failed bus initialisation.
+	retryWait time.Duration
+	Protocol  Protocol
+	Version   string
 }
 
 // New wraps rw. The read side should return within a reasonable time
 // (serial ports should be opened with a read timeout) so a stalled adapter
 // does not block forever.
 func New(rw io.ReadWriter) *Conn {
-	return &Conn{rw: rw, r: bufio.NewReader(rw), timeout: 5 * time.Second}
+	return &Conn{rw: rw, r: bufio.NewReader(rw), timeout: 5 * time.Second, retryWait: 6 * time.Second}
 }
 
 // Init resets the adapter and configures it for compact, machine-readable
@@ -102,7 +120,7 @@ func (c *Conn) Init(ctx context.Context, p Protocol) error {
 	}
 	// ATSP only takes effect on the first request; 0100 is supported by
 	// every OBD-II car and forces the search or the bus initialisation.
-	if _, err := c.command(ctx, "0100", searchTimeout); err != nil {
+	if err := c.connect(ctx); err != nil {
 		if p == 0 {
 			return fmt.Errorf("protocol search: %w", err)
 		}
@@ -118,6 +136,32 @@ func (c *Conn) Init(ctx context.Context, p Protocol) error {
 	}
 	c.Protocol = Protocol(n[0] - '0')
 	return nil
+}
+
+// connect sends the first request. A K-line ECU refuses a new handshake
+// while it still holds a session, such as one the adapter kept alive after
+// the previous run. The session ends after 5 s without bus traffic (P3max),
+// and every handshake attempt counts as traffic, so retry only after that.
+func (c *Conn) connect(ctx context.Context) error {
+	for attempt := 1; ; attempt++ {
+		_, err := c.command(ctx, "0100", searchTimeout)
+		if !errors.Is(err, ErrUnableConnect) || attempt == 3 {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(c.retryWait):
+		}
+	}
+}
+
+// Close ends the session with the car, so the adapter stops sending the
+// keep-alive requests that would hold a K-line ECU's session open for the
+// next connection. It does not close the underlying port.
+func (c *Conn) Close(ctx context.Context) error {
+	_, err := c.Command(ctx, "ATPC")
+	return err
 }
 
 // Command sends cmd and returns the non-empty response lines, without the
@@ -263,10 +307,23 @@ func decodeResponse(lines []string) ([][]byte, error) {
 	if multi != nil {
 		out = append(out, trim(multi, multiLen))
 	}
-	if len(out) == 0 {
+	// Keep the answers; a refusal only matters if no ECU answered.
+	var neg error
+	pos := out[:0]
+	for _, b := range out {
+		if len(b) >= 3 && b[0] == 0x7F {
+			neg = &NegativeResponse{Service: b[1], Code: b[2]}
+			continue
+		}
+		pos = append(pos, b)
+	}
+	if len(pos) == 0 && neg != nil {
+		return nil, neg
+	}
+	if len(pos) == 0 {
 		return nil, ErrNoData
 	}
-	return out, nil
+	return pos, nil
 }
 
 func trim(b []byte, n int) []byte {

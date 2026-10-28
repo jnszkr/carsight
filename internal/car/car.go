@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/jnszkr/carsight/internal/elm327"
 	"github.com/jnszkr/carsight/internal/obd"
@@ -60,8 +61,13 @@ func Connect(ctx context.Context, a Adapter) (*Car, error) {
 	return &Car{rw: rw, Conn: conn, Client: &obd.Client{R: conn, CAN: conn.Protocol.IsCAN()}, Desc: desc}, nil
 }
 
-// Close closes the adapter.
-func (c *Car) Close() error { return c.rw.Close() }
+// Close ends the session with the car and closes the adapter.
+func (c *Car) Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = c.Conn.Close(ctx)
+	return c.rw.Close()
+}
 
 // Protocol is the OBD protocol the adapter found.
 func (c *Car) Protocol() string { return c.Conn.Protocol.String() }

@@ -108,12 +108,44 @@ func TestInitProtocol(t *testing.T) {
 	}
 	for _, reply := range []string{"BUS INIT: ERROR", "BUS INIT: ...ERROR"} {
 		s.replies["0100"] = reply
-		if err := New(s).Init(context.Background(), 3); !errors.Is(err, ErrUnableConnect) {
+		c := New(s)
+		c.retryWait = time.Millisecond
+		if err := c.Init(context.Background(), 3); !errors.Is(err, ErrUnableConnect) {
 			t.Errorf("%s: %v", reply, err)
 		}
 	}
 	if err := New(s).Init(context.Background(), 10); err == nil {
 		t.Error("protocol 10 accepted")
+	}
+}
+
+// busy fails the bus initialisation a few times, like a K-line ECU that
+// still holds an earlier session.
+type busy struct {
+	*scripted
+	fails int
+}
+
+func (b *busy) Write(p []byte) (int, error) {
+	if string(p) == "0100\r" && b.fails > 0 {
+		b.fails--
+		b.out.WriteString("BUS INIT: ERROR\r\r>")
+		return len(p), nil
+	}
+	return b.scripted.Write(p)
+}
+
+func TestInitRetriesBusInit(t *testing.T) {
+	replies := map[string]string{
+		"": "", "ATZ": "ELM327 v2.3", "ATE0": "OK", "ATL0": "OK", "ATS0": "OK", "ATH0": "OK", "ATAT1": "OK",
+		"ATSP5": "OK", "0100": "BUS INIT: OK\r4100983B4011", "ATDPN": "5",
+	}
+	for fails, wantErr := range []bool{false, false, false, true} {
+		c := New(&busy{scripted: &scripted{replies: replies}, fails: fails})
+		c.retryWait = time.Millisecond
+		if err := c.Init(context.Background(), 5); (err != nil) != wantErr {
+			t.Errorf("%d failed inits: %v", fails, err)
+		}
 	}
 }
 
@@ -129,6 +161,15 @@ func TestRequestErrors(t *testing.T) {
 	}
 	if _, err := c.Request(ctx, "01A6"); !errors.Is(err, ErrBus) {
 		t.Errorf("01A6: %v", err)
+	}
+	s.replies["0A"] = "7F0A11"
+	var neg *NegativeResponse
+	if _, err := c.Request(ctx, "0A"); !errors.Is(err, ErrNoData) || !errors.As(err, &neg) || neg.Service != 0x0A || neg.Code != 0x11 {
+		t.Errorf("0A: %v", err)
+	}
+	s.replies["03"] = "7F0311\r43010133"
+	if got, err := c.Request(ctx, "03"); err != nil || len(got) != 1 || got[0][0] != 0x43 {
+		t.Errorf("03 with one refusal: %x, %v", got, err)
 	}
 	if _, err := c.Request(ctx, "ZZ"); !errors.Is(err, ErrUnknownCmd) {
 		t.Errorf("ZZ: %v", err)

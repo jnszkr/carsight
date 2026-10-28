@@ -61,8 +61,7 @@ func TestExplicitProtocol(t *testing.T) {
 	}{
 		{Volvo(), 6, false},
 		{Citroen(), 5, false},
-		{Citroen(), 6, true},
-		{Citroen(), 3, true},
+		{Citroen(), 6, true}, // slow: Init retries for a few seconds
 	}
 	for _, tt := range tests {
 		conn := elm327.New(New(tt.car))

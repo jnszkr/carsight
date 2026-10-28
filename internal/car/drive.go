@@ -104,9 +104,13 @@ func startDrive(ctx context.Context, c *Car, db *store.Store, o DriveOptions) (*
 	d := &Drive{car: c, db: db, opts: o, done: make(chan struct{})}
 	vin, err := c.Client.VIN(ctx)
 	if err != nil {
-		// Some older ECUs don't support mode 09; fall back to a stable placeholder.
-		d.logf("VIN unavailable (%v); logging under UNKNOWN", err)
+		// Older ECUs often don't report the VIN; the engine software's
+		// calibration ID still tells cars apart.
 		vin = "UNKNOWN"
+		if vi, _ := c.Client.ReadVehicleInfo(ctx); vi != nil && len(vi.CalibrationIDs) > 0 {
+			vin = "CALID-" + vi.CalibrationIDs[0]
+		}
+		d.logf("VIN unavailable (%v); logging under %s", err, vin)
 	}
 	if err := db.UpsertVehicle(ctx, store.Vehicle{VIN: vin, Name: o.Name, Protocol: c.Protocol()}); err != nil {
 		return nil, err

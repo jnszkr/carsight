@@ -47,7 +47,7 @@ Sold as "Made for FORScan", but it is a general OBD-II adapter that speaks the E
 | Car | Year | Notes |
 |---|---|---|
 | Volvo V70 | 2011 | P3 platform (Ford-related). Rich standard PID set. Extra modules on MS-CAN, which the vLinker FS can reach. |
-| Citroën C4 | 2006 | PSA. Fewer standard PIDs. Generic engine data only; PSA-specific modules are out of scope for v1. |
+| Citroën C4 | 2006 | PSA diesel (HDi). KWP2000 fast init on the K-line (pin 7) to the Bosch engine ECU; 12 standard PIDs, about 0.6 polling cycles a second. No VIN over OBD, so drives are filed under the engine's calibration ID (`CALID-…`). The OBD socket's CAN pins carry the car's internal bus, which doesn't answer OBD requests. PSA-specific modules are out of scope for v1. |
 
 ## Architecture
 
@@ -107,6 +107,8 @@ carsight clear-dtcs                                     # asks for confirmation
 `-port auto` (the default) picks the first `/dev/tty.usbserial-*`; the baud rate is auto-detected. carsight logs every standard PID the car supports (see [What carsight collects](#what-carsight-collects)). On CAN, each request tells the adapter to expect a single answer so it returns without waiting for its timeout.
 
 By default the adapter searches for the car's OBD protocol, which can take 10–20 seconds on older K-line cars (ISO 9141-2, KWP2000) because it tries CAN first; carsight allows 30 seconds for it. If you know the protocol, `-protocol N` (the ELM327 `ATSP` number, also a `protocol` argument on the MCP car tools) skips the search: `3` ISO 9141-2, `4` KWP2000 5-baud init, `5` KWP2000 fast init, `6` CAN 11 bit 500 kbaud.
+
+On K-line, an ECU refuses a new handshake for about 5 seconds after the last traffic of an earlier session, so a back-to-back connection can take an extra 6 seconds while carsight waits that out. carsight closes the session when it exits so the adapter stops keeping it alive. Cars that don't report a VIN are stored under their engine calibration ID.
 
 Each drive can carry a type (`-type`) and free-form notes (`-notes`). Suggested types: `cold_start`, `commute`, `city`, `highway`, `mixed`, `short_trip`, `idle_test`, `diagnostic` (others are allowed). Types let trends compare like with like: `carsight trend -type commute`.
 
@@ -245,7 +247,8 @@ Implemented and tested against the built-in simulator; not yet verified on the r
 
 Next:
 
-- [ ] Verify on the Volvo (CAN) and Citroën (K-line); tune thresholds from real baselines
+- [x] Verify on the Volvo (CAN) and Citroën (K-line)
+- [ ] Tune thresholds from real baselines
 - [ ] Multi-PID requests on CAN to raise the sample rate
 - [ ] Optional: Bluetooth adapter / phone logging, PostgreSQL
 - [ ] Optional: Volvo MS-CAN module data
