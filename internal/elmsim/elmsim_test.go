@@ -15,7 +15,7 @@ func TestSimulatorRoundTrip(t *testing.T) {
 		t.Run(car.VIN, func(t *testing.T) {
 			ctx := context.Background()
 			conn := elm327.New(New(car))
-			if err := conn.Init(ctx); err != nil {
+			if err := conn.Init(ctx, 0); err != nil {
 				t.Fatal(err)
 			}
 			if conn.Protocol.IsCAN() != car.CAN {
@@ -50,5 +50,29 @@ func TestSimulatorRoundTrip(t *testing.T) {
 				t.Errorf("DTCs after clear: %v", dtcs)
 			}
 		})
+	}
+}
+
+func TestExplicitProtocol(t *testing.T) {
+	tests := []struct {
+		car     Car
+		p       elm327.Protocol
+		wantErr bool
+	}{
+		{Volvo(), 6, false},
+		{Citroen(), 5, false},
+		{Citroen(), 6, true},
+		{Citroen(), 3, true},
+	}
+	for _, tt := range tests {
+		conn := elm327.New(New(tt.car))
+		err := conn.Init(context.Background(), tt.p)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("%s with %v: %v", tt.car.VIN, tt.p, err)
+			continue
+		}
+		if err == nil && conn.Protocol != tt.p {
+			t.Errorf("%s: protocol %v, want %v", tt.car.VIN, conn.Protocol, tt.p)
+		}
 	}
 }

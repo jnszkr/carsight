@@ -22,6 +22,9 @@ type Adapter struct {
 	Baud int
 	// SimSpeedup runs simulated time this many times faster.
 	SimSpeedup float64
+	// Protocol is the ELM327 protocol number (ATSP): 0 searches for it,
+	// 3 is ISO 9141-2, 4 and 5 KWP2000 (5-baud and fast init), 6-9 CAN.
+	Protocol int
 }
 
 // Car is an open connection to a car.
@@ -33,8 +36,8 @@ type Car struct {
 	Desc string
 }
 
-// Connect opens the adapter and initialises the ELM327, which searches for
-// the car's OBD protocol. The ignition must be on.
+// Connect opens the adapter and initialises the ELM327, which uses
+// a.Protocol or searches for the car's OBD protocol. The ignition must be on.
 func Connect(ctx context.Context, a Adapter) (*Car, error) {
 	if a.Port == "" {
 		a.Port = "auto"
@@ -42,12 +45,15 @@ func Connect(ctx context.Context, a Adapter) (*Car, error) {
 	if a.SimSpeedup <= 0 {
 		a.SimSpeedup = 1
 	}
+	if a.Protocol < 0 || a.Protocol > 9 {
+		return nil, fmt.Errorf("unknown OBD protocol %d (want 0 to search, or 1-9)", a.Protocol)
+	}
 	rw, desc, err := openAdapter(a.Port, a.Baud, a.SimSpeedup)
 	if err != nil {
 		return nil, err
 	}
 	conn := elm327.New(rw)
-	if err := conn.Init(ctx); err != nil {
+	if err := conn.Init(ctx, elm327.Protocol(a.Protocol)); err != nil {
 		rw.Close()
 		return nil, fmt.Errorf("initialise adapter on %s: %w", desc, err)
 	}

@@ -13,7 +13,8 @@ import (
 )
 
 type adapterIn struct {
-	Port string `json:"port,omitempty" jsonschema:"adapter serial device; default: the server's (usually auto-detected). 'sim:volvo' or 'sim:citroen' use the simulator"`
+	Port     string `json:"port,omitempty" jsonschema:"adapter serial device; default: the server's (usually auto-detected). 'sim:volvo' or 'sim:citroen' use the simulator"`
+	Protocol int    `json:"protocol,omitempty" jsonschema:"OBD protocol as an ELM327 ATSP number, to skip the protocol search: 3 = ISO 9141-2, 4 = KWP2000 5-baud init, 5 = KWP2000 fast init, 6-9 = CAN (6 = 11 bit 500 kbaud). Default: the server's (usually 0 = search). Older European petrol and diesel cars (roughly pre-2008) are often 3, 4 or 5"`
 }
 
 func (s *Server) adapterFor(in adapterIn) car.Adapter {
@@ -21,6 +22,9 @@ func (s *Server) adapterFor(in adapterIn) car.Adapter {
 	if in.Port != "" {
 		a.Port = in.Port
 		a.Baud = 0
+	}
+	if in.Protocol != 0 {
+		a.Protocol = in.Protocol
 	}
 	return a
 }

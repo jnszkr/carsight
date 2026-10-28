@@ -24,6 +24,11 @@ var (
 	ErrTimeout       = errors.New("elm327: timeout waiting for prompt")
 )
 
+// searchTimeout bounds the first request after ATSP. The adapter may try
+// every protocol in turn, and a K-line handshake (ISO 9141 or KWP2000 with
+// 5-baud init) alone can take several seconds.
+const searchTimeout = 30 * time.Second
+
 // Protocol is an OBD protocol number as reported by ATDPN.
 type Protocol byte
 
@@ -57,8 +62,9 @@ type Conn struct {
 	timeout time.Duration
 	// unsynced is set when a command gave up before the adapter's prompt
 	// (cancelled or timed out): its reply may still arrive and must not be
-	// taken for the next command's.
+	// taken for the next command's. resync is how long to wait for it.
 	unsynced bool
+	resync   time.Duration
 	Protocol Protocol
 	Version  string
 }
@@ -71,8 +77,12 @@ func New(rw io.ReadWriter) *Conn {
 }
 
 // Init resets the adapter and configures it for compact, machine-readable
-// output, then lets it auto-detect the vehicle protocol.
-func (c *Conn) Init(ctx context.Context) error {
+// output, then connects to the car with protocol p, or searches for the
+// protocol when p is 0.
+func (c *Conn) Init(ctx context.Context, p Protocol) error {
+	if p > 9 {
+		return fmt.Errorf("elm327: unknown protocol %d (want 0-9)", p)
+	}
 	// A stray partial command may be sitting in the adapter's buffer; a bare
 	// CR flushes it and gets us a prompt.
 	_, _ = c.Command(ctx, "")
@@ -85,38 +95,45 @@ func (c *Conn) Init(ctx context.Context) error {
 			c.Version = l
 		}
 	}
-	for _, cmd := range []string{"ATE0", "ATL0", "ATS0", "ATH0", "ATAT1", "ATSP0"} {
+	for _, cmd := range []string{"ATE0", "ATL0", "ATS0", "ATH0", "ATAT1", fmt.Sprintf("ATSP%d", p)} {
 		if _, err := c.Command(ctx, cmd); err != nil {
 			return fmt.Errorf("%s: %w", cmd, err)
 		}
 	}
-	// ATSP0 only takes effect on the first request; 0100 is supported by
-	// every OBD-II car and forces the protocol search.
-	if _, err := c.Command(ctx, "0100"); err != nil {
-		return fmt.Errorf("protocol search: %w", err)
+	// ATSP only takes effect on the first request; 0100 is supported by
+	// every OBD-II car and forces the search or the bus initialisation.
+	if _, err := c.command(ctx, "0100", searchTimeout); err != nil {
+		if p == 0 {
+			return fmt.Errorf("protocol search: %w", err)
+		}
+		return fmt.Errorf("connect with %v: %w", p, err)
 	}
 	dpn, err := c.Command(ctx, "ATDPN")
 	if err != nil || len(dpn) == 0 {
 		return fmt.Errorf("read protocol: %w", err)
 	}
-	p := strings.TrimPrefix(strings.ToUpper(dpn[0]), "A")
-	if len(p) != 1 || p[0] < '1' || p[0] > '9' {
+	n := strings.TrimPrefix(strings.ToUpper(dpn[0]), "A")
+	if len(n) != 1 || n[0] < '1' || n[0] > '9' {
 		return fmt.Errorf("unexpected ATDPN response %q", dpn[0])
 	}
-	c.Protocol = Protocol(p[0] - '0')
+	c.Protocol = Protocol(n[0] - '0')
 	return nil
 }
 
 // Command sends cmd and returns the non-empty response lines, without the
 // echo, status chatter ("SEARCHING...") or the trailing prompt.
 func (c *Conn) Command(ctx context.Context, cmd string) ([]string, error) {
+	return c.command(ctx, cmd, c.timeout)
+}
+
+func (c *Conn) command(ctx context.Context, cmd string, timeout time.Duration) ([]string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.unsynced {
 		// Wait out the abandoned reply. Writing now would interrupt the
 		// adapter mid-command or leave its answer in the buffer.
-		if _, err := c.readUntilPrompt(context.WithoutCancel(ctx)); err != nil {
+		if _, err := c.readUntilPrompt(context.WithoutCancel(ctx), c.resync); err != nil {
 			return nil, err
 		}
 		c.unsynced = false
@@ -124,16 +141,16 @@ func (c *Conn) Command(ctx context.Context, cmd string) ([]string, error) {
 	if _, err := io.WriteString(c.rw, cmd+"\r"); err != nil {
 		return nil, fmt.Errorf("elm327: write: %w", err)
 	}
-	raw, err := c.readUntilPrompt(ctx)
+	raw, err := c.readUntilPrompt(ctx, timeout)
 	if err != nil {
-		c.unsynced = true
+		c.unsynced, c.resync = true, timeout
 		return nil, err
 	}
 	return parseLines(cmd, raw)
 }
 
-func (c *Conn) readUntilPrompt(ctx context.Context) ([]byte, error) {
-	deadline := time.Now().Add(c.timeout)
+func (c *Conn) readUntilPrompt(ctx context.Context, timeout time.Duration) ([]byte, error) {
+	deadline := time.Now().Add(timeout)
 	var buf bytes.Buffer
 	for {
 		if err := ctx.Err(); err != nil {

@@ -125,6 +125,7 @@ func adapterFlags(fs *flag.FlagSet) *car.Adapter {
 	a := &car.Adapter{}
 	fs.StringVar(&a.Port, "port", "auto", "serial device, 'auto', or 'sim:volvo' / 'sim:citroen' for the simulator")
 	fs.IntVar(&a.Baud, "baud", 0, "baud rate (0 = auto-detect)")
+	fs.IntVar(&a.Protocol, "protocol", 0, "OBD protocol (ELM327 ATSP number): 0 = search, 3 = ISO 9141-2, 4/5 = KWP2000 5-baud/fast init, 6-9 = CAN")
 	fs.Float64Var(&a.SimSpeedup, "sim-speedup", 1, "simulator: run simulated time this many times faster")
 	return a
 }

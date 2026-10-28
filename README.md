@@ -106,6 +106,8 @@ carsight clear-dtcs                                     # asks for confirmation
 
 `-port auto` (the default) picks the first `/dev/tty.usbserial-*`; the baud rate is auto-detected. carsight logs every standard PID the car supports (see [What carsight collects](#what-carsight-collects)). On CAN, each request tells the adapter to expect a single answer so it returns without waiting for its timeout.
 
+By default the adapter searches for the car's OBD protocol, which can take 10–20 seconds on older K-line cars (ISO 9141-2, KWP2000) because it tries CAN first; carsight allows 30 seconds for it. If you know the protocol, `-protocol N` (the ELM327 `ATSP` number, also a `protocol` argument on the MCP car tools) skips the search: `3` ISO 9141-2, `4` KWP2000 5-baud init, `5` KWP2000 fast init, `6` CAN 11 bit 500 kbaud.
+
 Each drive can carry a type (`-type`) and free-form notes (`-notes`). Suggested types: `cold_start`, `commute`, `city`, `highway`, `mixed`, `short_trip`, `idle_test`, `diagnostic` (others are allowed). Types let trends compare like with like: `carsight trend -type commute`.
 
 No car handy? `-port sim:volvo` or `-port sim:citroen` runs against a simulated adapter (CAN / KWP2000, with a warming engine and a stop-and-go drive). `-sim-speedup 30` compresses time, which also blurs PID-to-PID timing, so don't read too much into simulated idle figures.

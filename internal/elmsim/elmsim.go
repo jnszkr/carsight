@@ -71,6 +71,8 @@ type Adapter struct {
 	spaces  bool
 	rng     *rand.Rand
 	cleared bool
+	// protocol is the ATSP number; 0 searches.
+	protocol byte
 }
 
 // New returns a simulated adapter. Simulated time starts at the first call.
@@ -130,12 +132,21 @@ func (a *Adapter) handle(cmd string) string {
 		a.spaces = false
 		return "OK"
 	case cmd == "ATDPN":
-		if a.car.CAN {
-			return "A6"
+		if a.protocol != 0 {
+			return string('0' + a.protocol)
 		}
-		return "A5"
+		return "A" + string('0'+a.carProtocol())
+	case len(cmd) == 5 && strings.HasPrefix(cmd, "ATSP") && cmd[4] >= '0' && cmd[4] <= '9':
+		a.protocol = cmd[4] - '0'
+		return "OK"
 	case strings.HasPrefix(cmd, "AT"):
 		return "OK"
+	}
+	if a.protocol != 0 && a.protocol != a.carProtocol() {
+		if a.protocol <= 5 {
+			return "BUS INIT: ...ERROR"
+		}
+		return "UNABLE TO CONNECT"
 	}
 	if a.start.IsZero() {
 		a.start = a.now()
@@ -184,6 +195,14 @@ func (a *Adapter) hex(b []byte) string {
 		fmt.Fprintf(&sb, "%02X", c)
 	}
 	return sb.String()
+}
+
+// carProtocol is the car's protocol: CAN 11 bit 500 kbaud or KWP2000 fast init.
+func (a *Adapter) carProtocol() byte {
+	if a.car.CAN {
+		return 6
+	}
+	return 5
 }
 
 func (a *Adapter) supported(pid byte) bool { return slices.Contains(a.car.PIDs, pid) }

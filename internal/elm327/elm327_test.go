@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // scripted replies to each command with a canned response.
@@ -44,7 +46,7 @@ func TestInit(t *testing.T) {
 		"ATH0": "OK", "ATAT1": "OK", "ATSP0": "OK", "0100": "SEARCHING...\r4100BE3FA813", "ATDPN": "A6",
 	}}
 	c := New(s)
-	if err := c.Init(context.Background()); err != nil {
+	if err := c.Init(context.Background(), 0); err != nil {
 		t.Fatal(err)
 	}
 	if c.Protocol != 6 || !c.Protocol.IsCAN() {
@@ -52,6 +54,60 @@ func TestInit(t *testing.T) {
 	}
 	if c.Version != "ELM327 v1.5" {
 		t.Errorf("version = %q", c.Version)
+	}
+}
+
+// slow holds back the reply to one command, like a K-line bus handshake.
+type slow struct {
+	*scripted
+	cmd   string
+	delay time.Duration
+	until time.Time
+}
+
+func (s *slow) Write(p []byte) (int, error) {
+	if strings.TrimSuffix(string(p), "\r") == s.cmd {
+		s.until = time.Now().Add(s.delay)
+	}
+	return s.scripted.Write(p)
+}
+
+func (s *slow) Read(p []byte) (int, error) {
+	if time.Now().Before(s.until) {
+		return 0, io.EOF
+	}
+	return s.scripted.Read(p)
+}
+
+func TestInitSlowSearch(t *testing.T) {
+	s := &slow{scripted: &scripted{replies: map[string]string{
+		"": "", "ATZ": "ELM327 v1.5", "ATE0": "OK", "ATL0": "OK", "ATS0": "OK", "ATH0": "OK", "ATAT1": "OK",
+		"ATSP0": "OK", "0100": "SEARCHING...\r4100BE1FA813", "ATDPN": "A5",
+	}}, cmd: "0100", delay: 300 * time.Millisecond}
+	c := New(s)
+	c.timeout = 100 * time.Millisecond // the search must not be held to it
+	if err := c.Init(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if c.Protocol != 5 {
+		t.Errorf("protocol = %v", c.Protocol)
+	}
+}
+
+func TestInitProtocol(t *testing.T) {
+	s := &scripted{replies: map[string]string{
+		"": "", "ATZ": "ELM327 v1.5", "ATE0": "OK", "ATL0": "OK", "ATS0": "OK", "ATH0": "OK", "ATAT1": "OK",
+		"ATSP3": "OK", "0100": "BUS INIT: ...OK\r4100BE1FA813", "ATDPN": "3",
+	}}
+	c := New(s)
+	if err := c.Init(context.Background(), 3); err != nil {
+		t.Fatal(err)
+	}
+	if c.Protocol != 3 || c.Protocol.IsCAN() {
+		t.Errorf("protocol = %v", c.Protocol)
+	}
+	if err := New(s).Init(context.Background(), 10); err == nil {
+		t.Error("protocol 10 accepted")
 	}
 }
 
