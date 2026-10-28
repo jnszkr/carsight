@@ -106,6 +106,52 @@ func TestSummarizeFaults(t *testing.T) {
 	}
 }
 
+// A warm diesel standing still with a few free revs, polled slowly and with
+// no throttle PID, as logged from a Citroën C4 over K-line.
+func TestSummarizeIdleIgnoresRevDown(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0)
+	rpms := []float64{744, 742, 744, 746, 743, 744, 744, 746, 744, 745, 1170, 2533, 1184, 738, 744, 742, 743, 744,
+		742, 740, 1904, 2649, 2805, 1010, 735, 743, 743, 744, 745, 743, 1951, 3165, 842, 742, 744, 743, 743, 745, 744}
+	var samples []store.Sample
+	for i, r := range rpms {
+		t := start.Add(time.Duration(i) * 1500 * time.Millisecond)
+		samples = append(samples,
+			store.Sample{T: t, PID: obd.RPM.Name, Value: r},
+			store.Sample{T: t, PID: obd.Speed.Name, Value: 0},
+			store.Sample{T: t, PID: obd.CoolantTemp.Name, Value: 80})
+	}
+	sess := store.Session{ID: 1, StartedAt: start, EndedAt: start.Add(time.Minute)}
+	s := Summarize(sess, store.Vehicle{}, samples, nil)
+	if s.Idle == nil || s.Idle.RPM.Max > 750 || s.Idle.RPM.Std > 5 {
+		t.Fatalf("idle includes revving: %+v", s.Idle)
+	}
+	for _, e := range s.Events {
+		if e.Kind == "unstable_idle" {
+			t.Errorf("unexpected %+v", e)
+		}
+	}
+}
+
+// DTCs are read at the start and the end of a drive; the same code read twice
+// is one code.
+func TestSummarizeDedupesDTCs(t *testing.T) {
+	s := summarize(1, time.Unix(1_700_000_000, 0), healthy,
+		store.DTC{Code: "P1351", Kind: "stored"}, store.DTC{Code: "P1351", Kind: "stored"},
+		store.DTC{Code: "P1351", Kind: "pending"}, store.DTC{Code: "P1351", Kind: "pending"})
+	if len(s.DTCs) != 2 {
+		t.Errorf("dtcs %+v", s.DTCs)
+	}
+	n := 0
+	for _, e := range s.Events {
+		if e.Kind == "dtc" {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Errorf("%d dtc events: %+v", n, s.Events)
+	}
+}
+
 func TestCompareAndTrends(t *testing.T) {
 	t0 := time.Unix(1_700_000_000, 0)
 	var base []Summary

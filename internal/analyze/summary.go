@@ -27,6 +27,7 @@ const (
 	MaxIdleRPM         = 1300.0
 	SlowWarmup         = 15 * time.Minute
 	minEventDuration   = 10 * time.Second
+	idleSettle         = 5 * time.Second
 )
 
 // Summary is the compact description of one drive. It is what gets sent to
@@ -124,8 +125,14 @@ func Summarize(sess store.Session, veh store.Vehicle, samples []store.Sample, dt
 	if !end.IsZero() {
 		sum.Duration = Duration(end.Sub(sess.StartedAt))
 	}
+	// Codes are read at the start and the end of a drive; list each once.
+	seen := map[DTCEntry]bool{}
 	for _, d := range dtcs {
-		sum.DTCs = append(sum.DTCs, DTCEntry{d.Code, d.Kind})
+		e := DTCEntry{d.Code, d.Kind}
+		if !seen[e] {
+			seen[e] = true
+			sum.DTCs = append(sum.DTCs, e)
+		}
 	}
 	if sess.Readiness != "" {
 		var r obd.Readiness
@@ -197,13 +204,16 @@ func Summarize(sess store.Session, veh store.Vehicle, samples []store.Sample, dt
 	}
 
 	// Warm idle: stationary, foot off the throttle, and RPM in idle range so
-	// rolling to a stop with the clutch in doesn't count.
+	// rolling to a stop with the clutch in doesn't count. RPM must also stay in
+	// idle range for idleSettle either side, so a blip of the throttle and the
+	// RPM falling back from it don't count either (diesels often report no
+	// throttle position).
 	throttle := g[obd.Throttle.Name]
 	idleCond := func(t time.Time) bool {
 		if !running(t) || !warm(t) || !stopped(t) {
 			return false
 		}
-		if v, ok := rpm.at(t); !ok || v > MaxIdleRPM {
+		if v, ok := rpm.at(t); !ok || v > MaxIdleRPM || rpm.anyWithin(t, idleSettle, func(v float64) bool { return v > MaxIdleRPM }) {
 			return false
 		}
 		v, ok := throttle.at(t)

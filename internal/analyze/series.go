@@ -56,6 +56,19 @@ func (s *series) at(t time.Time) (float64, bool) {
 	return s.v[i], true
 }
 
+// anyWithin reports whether any sample within d of t satisfies cond.
+func (s *series) anyWithin(t time.Time, d time.Duration, cond func(v float64) bool) bool {
+	if s == nil {
+		return false
+	}
+	for i := sort.Search(len(s.t), func(i int) bool { return !s.t[i].Before(t.Add(-d)) }); i < len(s.t) && !s.t[i].After(t.Add(d)); i++ {
+		if cond(s.v[i]) {
+			return true
+		}
+	}
+	return false
+}
+
 // Stats are simple descriptive statistics.
 type Stats struct {
 	N    int     `json:"n"`
