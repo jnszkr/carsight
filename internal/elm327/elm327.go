@@ -193,7 +193,9 @@ func parseLines(cmd string, raw []byte) ([]string, error) {
 			return nil, ErrNoData
 		case up == "?":
 			return nil, fmt.Errorf("%w: %q", ErrUnknownCmd, cmd)
-		case strings.Contains(up, "UNABLE TO CONNECT"), strings.Contains(up, "BUS INIT: ...ERROR"):
+		case strings.Contains(up, "UNABLE TO CONNECT"), strings.HasPrefix(up, "BUS INIT") && strings.Contains(up, "ERROR"):
+			// "BUS INIT: ...ERROR", or "BUS INIT: ERROR" on some clones: the
+			// K-line ECU did not answer the handshake.
 			return nil, ErrUnableConnect
 		case strings.Contains(up, "CAN ERROR"), strings.Contains(up, "BUS ERROR"),
 			strings.Contains(up, "FB ERROR"), strings.Contains(up, "DATA ERROR"),

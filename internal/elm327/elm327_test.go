@@ -106,6 +106,12 @@ func TestInitProtocol(t *testing.T) {
 	if c.Protocol != 3 || c.Protocol.IsCAN() {
 		t.Errorf("protocol = %v", c.Protocol)
 	}
+	for _, reply := range []string{"BUS INIT: ERROR", "BUS INIT: ...ERROR"} {
+		s.replies["0100"] = reply
+		if err := New(s).Init(context.Background(), 3); !errors.Is(err, ErrUnableConnect) {
+			t.Errorf("%s: %v", reply, err)
+		}
+	}
 	if err := New(s).Init(context.Background(), 10); err == nil {
 		t.Error("protocol 10 accepted")
 	}
