@@ -330,8 +330,16 @@ func (d *Drive) run(ctx context.Context) {
 		}
 		return out
 	}
+	total := len(d.groups[obd.Fast]) + len(d.groups[obd.Slow]) + len(d.groups[obd.Extra])
 loop:
-	for {
+	for ctx.Err() == nil {
+		if len(dropped) == total {
+			// Typically the engine was switched off: a K-line ECU then refuses
+			// every request ("conditions not correct").
+			reason = "the car stopped answering every PID (engine switched off?)"
+			d.logf("%s", reason)
+			break
+		}
 		cycle = nil
 		for _, rate := range []obd.Rate{obd.Fast, obd.Slow, obd.Extra} {
 			for _, g := range due(rate) {

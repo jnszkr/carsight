@@ -36,6 +36,10 @@ type Car struct {
 	// Latency is how long each OBD request takes to answer, like a real
 	// adapter waiting for the ECU.
 	Latency time.Duration
+	// EngineOffAfter switches the engine off after this much simulated
+	// time (0 = never): like a K-line ECU, it then refuses mode 01 with
+	// "conditions not correct".
+	EngineOffAfter time.Duration
 }
 
 // Volvo is a 2011 Volvo V70-like car on CAN.
@@ -172,6 +176,8 @@ func (a *Adapter) handle(cmd string) string {
 		return a.mode06(cmd[2:])
 	case strings.HasPrefix(cmd, "02") && len(cmd) == 6:
 		return a.mode02(cmd[2:4])
+	case strings.HasPrefix(cmd, "01") && len(cmd) == 4 && a.engineOff():
+		return a.hex([]byte{0x7F, 0x01, 0x22})
 	case strings.HasPrefix(cmd, "01") && len(cmd) == 4:
 		var pid byte
 		if _, err := fmt.Sscanf(cmd[2:], "%02X", &pid); err != nil {
@@ -476,6 +482,11 @@ type state struct {
 
 // state models a short urban drive: idle while warming up, then a repeating
 // cycle of accelerate / cruise / brake / stop.
+func (a *Adapter) engineOff() bool {
+	off := a.car.EngineOffAfter
+	return off > 0 && time.Duration(float64(a.now().Sub(a.start))*a.car.Speedup) > off
+}
+
 func (a *Adapter) state() state {
 	t := a.now().Sub(a.start).Seconds() * a.car.Speedup
 	n := func(sd float64) float64 { return a.rng.NormFloat64() * sd }
