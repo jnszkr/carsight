@@ -1,0 +1,48 @@
+# Tags every push to main as the next patch release (v0.1.0, v0.1.1, ...) so
+# 'go install' and 'carsight version' report a real version. To bump the minor
+# or major version, push a tag such as v0.2.0 by hand; the next run continues
+# from it.
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - run: go vet ./...
+      - run: go test ./...
+
+      - name: Tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git tag --points-at "$GITHUB_SHA" | grep -q '^v'; then
+            echo "$GITHUB_SHA is already tagged"
+            exit 0
+          fi
+          last=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+          if [ -z "$last" ]; then
+            next=v0.1.0
+          else
+            IFS=. read -r major minor patch <<< "${last#v}"
+            next="v$major.$minor.$((patch + 1))"
+          fi
+          gh release create "$next" --target "$GITHUB_SHA" --title "$next" --generate-notes

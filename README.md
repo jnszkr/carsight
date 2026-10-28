@@ -81,7 +81,7 @@ Requires Go 1.27+. No cgo: SQLite is the pure-Go `modernc.org/sqlite`.
 go install github.com/jnszkr/carsight/cmd/carsight@latest
 ```
 
-This puts a single `carsight` binary in `$(go env GOPATH)/bin`. All commands share one database: `-db` on any command, the `CARSIGHT_DB` environment variable, or by default `carsight/carsight.db` in your user config directory (`~/Library/Application Support` on macOS).
+This puts a single `carsight` binary in `$(go env GOPATH)/bin`; `carsight version` shows which release (and commit) it is. Every push to `main` is tagged as the next patch release by [the release workflow](.github/workflows/release.yml). When installing from a local checkout, run `git fetch --tags` first so the build picks up the tag. All commands share one database: `-db` on any command, the `CARSIGHT_DB` environment variable, or by default `carsight/carsight.db` in your user config directory (`~/Library/Application Support` on macOS).
 
 ## Usage
 

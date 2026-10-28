@@ -49,6 +49,7 @@ Data commands:
   dashboard   serve the local web dashboard of logged drives
   mcp         serve carsight to an AI assistant over MCP (stdio): analysis,
               raw data, and starting/stopping drives
+  version     show the version and commit this binary was built from
 
 Run 'carsight <command> -h' for the command's flags.
 `
@@ -79,6 +80,8 @@ func main() {
 		err = mcpCmd(ctx, args)
 	case "dashboard":
 		err = dashboardCmd(ctx, args)
+	case "version", "-version", "--version":
+		fmt.Println(versionLine())
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
@@ -491,6 +494,32 @@ func version() string {
 		return bi.Main.Version
 	}
 	return "dev"
+}
+
+// versionLine is the version followed by the commit it was built from, when
+// the build recorded one: a release tag (v0.1.3) for builds of a tagged
+// commit, otherwise a pseudo-version.
+func versionLine() string {
+	line := "carsight " + version()
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return line
+	}
+	vcs := map[string]string{}
+	for _, s := range bi.Settings {
+		vcs[s.Key] = s.Value
+	}
+	if rev := vcs["vcs.revision"]; len(rev) >= 7 {
+		line += " (commit " + rev[:7]
+		if t := vcs["vcs.time"]; t != "" {
+			line += ", " + t
+		}
+		if vcs["vcs.modified"] == "true" {
+			line += ", modified"
+		}
+		line += ")"
+	}
+	return line
 }
 
 // parseDay parses YYYY-MM-DD in local time; end makes it exclusive (the
