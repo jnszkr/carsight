@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -60,13 +61,15 @@ func TestLocalOnly(t *testing.T) {
 	}
 }
 
-func TestDriveAnalysis(t *testing.T) {
+// oneDrive stores a minute of warm idle with a stored DTC, logged by v9.9.9.
+func oneDrive(t *testing.T) (*store.Store, int64) {
+	t.Helper()
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 	if err := db.UpsertVehicle(ctx, store.Vehicle{VIN: "VIN1", Name: "Test car"}); err != nil {
 		t.Fatal(err)
 	}
@@ -89,17 +92,32 @@ func TestDriveAnalysis(t *testing.T) {
 	if err := db.AddDTCs(ctx, id, "stored", []string{"P1351"}, start); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.SetCollector(ctx, id, "v9.9.9", "ELM327 v1.5"); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.EndSession(ctx, id, start.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
+	return db, id
+}
 
-	r := httptest.NewRequest("GET", fmt.Sprintf("/api/drives/%d/analysis", id), nil)
+// get serves one request to the dashboard.
+func get(t *testing.T, db *store.Store, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest("GET", path, nil)
 	r.Host = "127.0.0.1:7341"
 	w := httptest.NewRecorder()
 	New(db, nil).Handler().ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
-		t.Fatalf("status %d: %s", w.Code, w.Body)
+		t.Fatalf("%s: status %d: %s", path, w.Code, w.Body)
 	}
+	return w
+}
+
+func TestDriveAnalysis(t *testing.T) {
+	db, id := oneDrive(t)
+
+	w := get(t, db, fmt.Sprintf("/api/drives/%d/analysis", id))
 	var out struct {
 		Drive struct {
 			Idle   *struct{ RPM struct{ Mean float64 } } `json:"idle"`
@@ -118,5 +136,64 @@ func TestDriveAnalysis(t *testing.T) {
 	}
 	if out.Baseline == nil {
 		t.Error("baseline_deltas missing")
+	}
+}
+
+func TestDriveRecordsLogger(t *testing.T) {
+	db, id := oneDrive(t)
+	var out struct {
+		Session struct {
+			Software string `json:"logged_by"`
+			Adapter  string `json:"adapter"`
+		} `json:"session"`
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(get(t, db, fmt.Sprintf("/api/drives/%d", id)).Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Session.Software != "v9.9.9" || out.Session.Adapter != "ELM327 v1.5" || out.Version == "" {
+		t.Errorf("%+v", out)
+	}
+}
+
+func TestSamplesCSV(t *testing.T) {
+	db, id := oneDrive(t)
+	w := get(t, db, fmt.Sprintf("/api/drives/%d/samples.csv", id))
+	rows, err := csv.NewReader(w.Body).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Header plus rpm, speed and coolant for 60 seconds.
+	if len(rows) != 1+180 || rows[0][2] != "pid" || rows[1][2] != obd.RPM.Name || rows[1][4] != obd.RPM.Unit {
+		t.Errorf("%d rows, first %v %v", len(rows), rows[0], rows[1])
+	}
+}
+
+func TestVehicleTrends(t *testing.T) {
+	db, _ := oneDrive(t)
+	var vs struct {
+		Vehicles []struct {
+			VIN    string `json:"vin"`
+			Drives int    `json:"drives"`
+		} `json:"vehicles"`
+	}
+	if err := json.Unmarshal(get(t, db, "/api/vehicles").Body.Bytes(), &vs); err != nil {
+		t.Fatal(err)
+	}
+	if len(vs.Vehicles) != 1 || vs.Vehicles[0].VIN != "VIN1" || vs.Vehicles[0].Drives != 1 {
+		t.Errorf("%+v", vs)
+	}
+	// The drive is a minute long: left out by default, included with
+	// min_minutes=0.
+	for q, want := range map[string]int{"": 0, "?min_minutes=0": 1} {
+		var tr struct {
+			Drives []any `json:"drives"`
+		}
+		if err := json.Unmarshal(get(t, db, "/api/vehicles/VIN1/trends"+q).Body.Bytes(), &tr); err != nil {
+			t.Fatal(err)
+		}
+		if len(tr.Drives) != want {
+			t.Errorf("%q: %d drives, want %d", q, len(tr.Drives), want)
+		}
 	}
 }

@@ -6,6 +6,7 @@ package dashboard
 import (
 	"context"
 	_ "embed"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,11 +14,13 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/jnszkr/carsight/internal/analyze"
+	"github.com/jnszkr/carsight/internal/buildinfo"
 	"github.com/jnszkr/carsight/internal/car"
 	"github.com/jnszkr/carsight/internal/obd"
 	"github.com/jnszkr/carsight/internal/store"
@@ -124,6 +127,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/drives/{id}", s.drive)
 	mux.HandleFunc("GET /api/drives/{id}/live", s.stream)
 	mux.HandleFunc("GET /api/drives/{id}/analysis", s.analysis)
+	mux.HandleFunc("GET /api/drives/{id}/samples.csv", s.samplesCSV)
+	mux.HandleFunc("GET /vehicle/{vin}", serve)
+	mux.HandleFunc("GET /api/vehicles", s.vehicles)
+	mux.HandleFunc("GET /api/vehicles/{vin}/trends", s.trends)
 	return localOnly(mux)
 }
 
@@ -172,6 +179,8 @@ type sessionOut struct {
 	Protocol  string    `json:"protocol,omitempty"`
 	DriveType string    `json:"drive_type,omitempty"`
 	Notes     string    `json:"notes,omitempty"`
+	Software  string    `json:"logged_by,omitempty"` // carsight version that logged it
+	Adapter   string    `json:"adapter,omitempty"`
 }
 
 func (s *Server) sessionOut(ctx context.Context, sess store.Session, names map[string]string) sessionOut {
@@ -182,7 +191,7 @@ func (s *Server) sessionOut(ctx context.Context, sess store.Session, names map[s
 		names[sess.VIN] = name
 	}
 	o := sessionOut{ID: sess.ID, VIN: sess.VIN, Vehicle: name, StartedAt: sess.StartedAt, Protocol: sess.Protocol,
-		DriveType: sess.DriveType, Notes: sess.Notes, Live: s.liveDrive(sess.ID) != nil}
+		DriveType: sess.DriveType, Notes: sess.Notes, Software: sess.Software, Adapter: sess.Adapter, Live: s.liveDrive(sess.ID) != nil}
 	if !sess.EndedAt.IsZero() {
 		o.Duration = math.Round(sess.EndedAt.Sub(sess.StartedAt).Seconds())
 	} else if o.Live {
@@ -202,7 +211,7 @@ func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
 	for _, sess := range ss {
 		out = append(out, s.sessionOut(r.Context(), sess, names))
 	}
-	writeJSON(w, map[string]any{"sessions": out})
+	writeJSON(w, map[string]any{"sessions": out, "version": buildinfo.Version()})
 }
 
 type pidInfo struct {
@@ -233,6 +242,9 @@ type driveOut struct {
 	Info json.RawMessage `json:"info,omitempty"`
 	// Units of the snapshot values, by PID name.
 	Units map[string]string `json:"units"`
+	// Version is the carsight serving the page (the drive's logger is
+	// Session.Software).
+	Version string `json:"version"`
 }
 
 func (s *Server) sessionByID(w http.ResponseWriter, r *http.Request) (store.Session, bool) {
@@ -263,7 +275,8 @@ func (s *Server) drive(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	out := driveOut{Session: s.sessionOut(r.Context(), sess, map[string]string{}), Series: map[string]*series{}, DTCs: []dtcOut{}}
+	out := driveOut{Session: s.sessionOut(r.Context(), sess, map[string]string{}), Series: map[string]*series{}, DTCs: []dtcOut{},
+		Version: buildinfo.Version()}
 	for _, sm := range all {
 		ser := out.Series[sm.PID]
 		if ser == nil {
@@ -328,7 +341,102 @@ func (s *Server) analysis(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, struct {
 		analyze.DriveAnalysis
 		MetricDescriptions map[string]string `json:"metric_descriptions"`
-	}{a, analyze.MetricDescriptions})
+		Version            string            `json:"version"`
+	}{a, analyze.MetricDescriptions, buildinfo.Version()})
+}
+
+// samplesCSV is every sample of a drive at full resolution, one row per
+// reading.
+func (s *Server) samplesCSV(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.sessionByID(w, r)
+	if !ok {
+		return
+	}
+	all, err := s.db.Samples(r.Context(), sess.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	units := map[string]string{}
+	for _, p := range obd.All {
+		units[p.Name] = p.Unit
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="carsight-drive-%d.csv"`, sess.ID))
+	cw := csv.NewWriter(w)
+	cw.Write([]string{"time", "seconds", "pid", "value", "unit"})
+	for _, sm := range all {
+		cw.Write([]string{sm.T.UTC().Format(time.RFC3339Nano), strconv.FormatFloat(sm.T.Sub(sess.StartedAt).Seconds(), 'f', 3, 64),
+			sm.PID, strconv.FormatFloat(sm.Value, 'f', -1, 64), units[sm.PID]})
+	}
+	cw.Flush()
+}
+
+type vehicleOut struct {
+	VIN       string    `json:"vin"`
+	Name      string    `json:"name,omitempty"`
+	Protocol  string    `json:"protocol,omitempty"`
+	Drives    int       `json:"drives"`
+	LastDrive time.Time `json:"last_drive,omitempty"`
+}
+
+func (s *Server) vehicles(w http.ResponseWriter, r *http.Request) {
+	vs, err := s.db.Vehicles(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out := []vehicleOut{}
+	for _, v := range vs {
+		ss, err := s.db.Sessions(r.Context(), v.VIN, time.Time{}, time.Time{})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		o := vehicleOut{VIN: v.VIN, Name: v.Name, Protocol: v.Protocol, Drives: len(ss)}
+		if len(ss) > 0 {
+			o.LastDrive = ss[0].StartedAt
+		}
+		out = append(out, o)
+	}
+	writeJSON(w, map[string]any{"vehicles": out, "version": buildinfo.Version()})
+}
+
+// trends is a car's key metrics across its drives. min_minutes sets the
+// shortest drive that counts (default 5, as the MCP server uses).
+func (s *Server) trends(w http.ResponseWriter, r *http.Request) {
+	vin := r.PathValue("vin")
+	v, err := s.db.Vehicle(r.Context(), vin)
+	if errors.Is(err, store.ErrNotFound) {
+		http.Error(w, fmt.Sprintf("no vehicle %s", vin), http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	minDur := baselineMinDur
+	if m := r.URL.Query().Get("min_minutes"); m != "" {
+		f, err := strconv.ParseFloat(m, 64)
+		if err != nil || f < 0 {
+			http.Error(w, "bad min_minutes", http.StatusBadRequest)
+			return
+		}
+		minDur = time.Duration(f * float64(time.Minute))
+	}
+	t, err := analyze.AnalyzeTrends(r.Context(), s.db, analyze.TrendFilter{VIN: vin, MinDuration: minDur,
+		DriveType: strings.TrimSpace(r.URL.Query().Get("drive_type"))})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, struct {
+		analyze.TrendAnalysis
+		Protocol           string            `json:"protocol,omitempty"`
+		MinMinutes         float64           `json:"min_minutes"`
+		MetricDescriptions map[string]string `json:"metric_descriptions"`
+		Version            string            `json:"version"`
+	}{t, v.Protocol, minDur.Minutes(), analyze.MetricDescriptions, buildinfo.Version()})
 }
 
 // thin reduces a series to at most n points by keeping the minimum and

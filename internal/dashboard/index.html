@@ -99,6 +99,7 @@ h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
 .card .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .card .name { font-size: 13px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card .val { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.card .val span.label { font-size: 13px; font-weight: 500; white-space: normal; }
 .card .val small { font-size: 12px; font-weight: 400; color: var(--text-muted); margin-left: 3px; }
 .card canvas { display: block; width: 100%; height: 130px; cursor: crosshair; touch-action: pan-y; }
 .empty { color: var(--text-muted); padding: 32px 0; text-align: center; }
@@ -136,6 +137,24 @@ h2 { font-size: 15px; font-weight: 650; margin: 28px 0 10px; }
 .panel td.flag { color: var(--critical); font-weight: 600; }
 .panel.wide { grid-column: 1 / -1; }
 details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
+header .ver { margin-left: auto; font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.controls .spacer { flex: 1; }
+a.btn { text-decoration: none; }
+.vehicles { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.vehicle { display: block; text-decoration: none; background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+.vehicle:hover { border-color: var(--hair); }
+.vehicle .vn { font-weight: 650; }
+.vehicle .vd { font-size: 12px; color: var(--text-muted); margin-top: 2px; overflow-wrap: anywhere; }
+.trend { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; min-width: 0; }
+.trend .name { font-size: 13px; color: var(--text-secondary); }
+.trend .val { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.trend .chg { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.trend svg { display: block; width: 100%; height: 64px; margin-top: 6px; }
+.trend svg .line { fill: none; stroke: var(--series-1); stroke-width: 1.5; }
+.trend svg .pt { fill: var(--series-1); }
+.trend svg .grid-l { stroke: var(--grid); }
+.nowrap { white-space: nowrap; }
+.check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); cursor: pointer; }
 @media (max-width: 600px) {
   .grid { grid-template-columns: 1fr; }
   .hide-sm { display: none; }
@@ -146,6 +165,7 @@ details summary { cursor: pointer; color: var(--text-secondary); font-size: 13px
 <header>
   <a class="brand" href="/">carsight</a>
   <span class="crumb" id="crumb"></span>
+  <span class="ver" id="ver" title="carsight serving this page"></span>
 </header>
 <main id="main"></main>
 <script>
@@ -166,8 +186,12 @@ function fmtVal(v) {
 }
 const fmtDate = d => new Date(d).toLocaleString(undefined, {weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"});
 
-const m = location.pathname.match(/^\/drive\/(\d+)/);
-if (m) drivePage(+m[1]); else indexPage();
+// The carsight serving the page; each drive also records the one that logged it.
+function showVersion(v) { if (v) document.getElementById("ver").textContent = `carsight ${v}`; }
+const loggedBy = s => s.logged_by ? `carsight ${s.logged_by}` : "";
+
+const m = location.pathname.match(/^\/drive\/(\d+)/), mv = location.pathname.match(/^\/vehicle\/([^/]+)/);
+if (m) drivePage(+m[1]); else if (mv) vehiclePage(decodeURIComponent(mv[1])); else indexPage();
 
 // ---------- drive list ----------
 
@@ -175,22 +199,34 @@ async function indexPage() {
   $crumb.textContent = "Drives";
   document.title = "Drives · carsight";
   async function load() {
-    let data;
-    try { data = await (await fetch("/api/sessions")).json(); }
-    catch { return; }
+    let data, vdata;
+    try {
+      [data, vdata] = await Promise.all([fetch("/api/sessions"), fetch("/api/vehicles")].map(p => p.then(r => r.json())));
+    } catch { return; }
+    showVersion(data.version);
     const ss = data.sessions;
     if (!ss.length) {
       $main.innerHTML = `<div class="empty">No drives logged yet. Start one with <b>start_drive</b> or <b>carsight log</b>.</div>`;
       return;
     }
-    $main.innerHTML = `<div class="table-wrap"><table>
-      <thead><tr><th>Started</th><th>Vehicle</th><th>Type</th><th>Duration</th><th class="hide-sm">Notes</th><th></th></tr></thead>
+    const vehicles = vdata.vehicles.filter(v => v.drives);
+    $main.innerHTML = `<h2 style="margin-top:0">Vehicles</h2>
+      <div class="vehicles">${vehicles.map(v => `<a class="vehicle" href="/vehicle/${encodeURIComponent(v.vin)}">
+        <div class="vn">${esc(v.name || v.vin)}</div>
+        <div class="vd">${v.drives} drive${v.drives === 1 ? "" : "s"} · last ${esc(fmtDate(v.last_drive))}</div>
+        <div class="vd">${esc(v.protocol)}</div>
+        <div class="vd">Trends across drives →</div>
+      </a>`).join("")}</div>
+      <h2>Drives</h2>
+      <div class="table-wrap"><table>
+      <thead><tr><th>Started</th><th>Vehicle</th><th>Type</th><th>Duration</th><th class="hide-sm">Notes</th><th class="hide-sm">Logged by</th><th></th></tr></thead>
       <tbody>${ss.map(s => `<tr data-id="${s.id}">
         <td><a href="/drive/${s.id}">${esc(fmtDate(s.started_at))}</a></td>
         <td>${esc(s.vehicle || s.vin)}</td>
         <td>${s.drive_type ? `<span class="chip">${esc(s.drive_type)}</span>` : ""}</td>
         <td class="num">${s.duration_s ? fmtDur(s.duration_s) : "–"}</td>
         <td class="notes hide-sm" title="${esc(s.notes)}">${esc(s.notes)}</td>
+        <td class="hide-sm muted">${esc(loggedBy(s) || "–")}</td>
         <td>${s.live ? `<span class="badge live"><span class="dot"></span>Live</span>` : ""}</td>
       </tr>`).join("")}</tbody></table></div>`;
     $main.querySelectorAll("tbody tr").forEach(tr => tr.onclick = e => {
@@ -200,6 +236,81 @@ async function indexPage() {
   await load();
   // Pick up a drive that starts while the list is open.
   setInterval(load, 5000);
+}
+
+// ---------- one car across drives ----------
+
+async function vehiclePage(vin) {
+  $crumb.innerHTML = `<a href="/">Drives</a> / ${esc(vin)}`;
+  // ?all=1 includes drives under 5 minutes.
+  let all = new URLSearchParams(location.search).get("all") === "1";
+  async function load() {
+    const r = await fetch(`/api/vehicles/${encodeURIComponent(vin)}/trends${all ? "?min_minutes=0" : ""}`);
+    if (!r.ok) { $main.innerHTML = `<div class="empty">${esc(await r.text())}</div>`; return; }
+    const t = await r.json();
+    showVersion(t.version);
+    const name = t.vehicle || vin, desc = t.metric_descriptions || {};
+    document.title = `${name} · trends · carsight`;
+    $crumb.innerHTML = `<a href="/">Drives</a> / ${esc(name)}`;
+    const ds = t.drives;
+    const metrics = [...new Set(ds.flatMap(d => Object.keys(d.metrics)))].sort();
+    const label = k => desc[k] || k;
+    const short = {warmup_to_75c_s: "to 75 °C, s", coolant_max_c: "max coolant °C", idle_rpm_mean: "idle rpm", idle_rpm_std: "idle rpm ±",
+      idle_maf_gs: "idle MAF g/s", idle_timing_deg: "idle timing °", stft_warm_mean: "STFT %", ltft_warm_mean: "LTFT %",
+      trim_total_idle: "trim idle %", trim_total_cruise: "trim cruise %", o2_b1s1_std: "O2 ±V", voltage_running_mean: "volts"};
+    const signed = v => `${v > 0 ? "+" : ""}${fmtVal(v)}`;
+    const spark = vals => {
+      const W = 300, H = 64, P = 6, pts = vals.map((v, i) => [i, v]).filter(([, v]) => v != null);
+      if (!pts.length) return "";
+      // Keep at least a 10 % band around the values, so noise doesn't
+      // fill the chart as if it were a trend.
+      let lo = Math.min(...pts.map(p => p[1])), hi = Math.max(...pts.map(p => p[1]));
+      const need = Math.max(Math.abs(lo + hi) / 2 * 0.1, 1e-9);
+      if (hi - lo < need) { const mid = (lo + hi) / 2; lo = mid - need / 2; hi = mid + need / 2; }
+      const span = hi - lo;
+      const x = i => vals.length > 1 ? P + i / (vals.length - 1) * (W - 2 * P) : W / 2;
+      const y = v => H - P - (v - lo) / span * (H - 2 * P);
+      const xy = pts.map(([i, v]) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`);
+      return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="values per drive">
+        <line class="grid-l" x1="0" x2="${W}" y1="${H - P}" y2="${H - P}"/><line class="grid-l" x1="0" x2="${W}" y1="${P}" y2="${P}"/>
+        ${pts.length > 1 ? `<polyline class="line" points="${xy.join(" ")}"/>` : ""}
+        ${xy.map(c => `<circle class="pt" r="2.5" cx="${c.split(",")[0]}" cy="${c.split(",")[1]}"/>`).join("")}</svg>`;
+    };
+    const trendCards = t.trends.map(l => `<div class="trend" title="${esc(l.metric)}">
+      <div class="name">${esc(label(l.metric))}</div>
+      <div class="val">${fmtVal(l.last)}</div>
+      <div class="chg">${l.n} drives · first ${fmtVal(l.first)} · mean ${fmtVal(l.mean)} · ${signed(l.slope_per_drive)} per drive${l.slope_per_30d != null ? ` · ${signed(l.slope_per_30d)} per 30 days` : ""}</div>
+      ${spark(l.values)}</div>`).join("");
+    $main.innerHTML = `
+      <div class="head"><div>
+        <h1>${esc(name)}</h1>
+        <div class="sub">VIN ${esc(vin)}${t.protocol ? " · " + esc(t.protocol) : ""}</div>
+      </div></div>
+      <div class="controls"><label class="check"><input type="checkbox" id="all" ${all ? "checked" : ""}> Include drives shorter than 5 minutes</label></div>
+      ${ds.length ? `
+        <h2>Trends across drives</h2>
+        ${t.trends.length ? `<div class="grid">${trendCards}</div>` : `<div class="muted">Trends need at least 2 drives with the same metric.</div>`}
+        <h2>Drives</h2>
+        <div class="table-wrap"><table><thead><tr><th>Started</th><th>Type</th><th class="num">Duration</th><th class="num">km</th><th>Start</th>
+          ${metrics.map(k => `<th class="num nowrap" title="${esc(label(k))}">${esc(short[k] || k.replace(/_/g, " "))}</th>`).join("")}<th>Findings</th></tr></thead><tbody>
+          ${[...ds].reverse().map(d => `<tr data-id="${d.session_id}">
+            <td class="nowrap"><a href="/drive/${d.session_id}">${esc(fmtDate(d.start))}</a></td>
+            <td>${d.drive_type ? `<span class="chip">${esc(d.drive_type)}</span>` : ""}</td>
+            <td class="num">${fmtDur(d.duration_s)}</td><td class="num">${fmtVal(d.distance_km)}</td><td>${d.cold_start ? "cold" : "warm"}</td>
+            ${metrics.map(k => `<td class="num">${fmtVal(d.metrics[k])}</td>`).join("")}
+            <td class="notes" title="${esc(d.events.join("\n"))}">${d.events.length ? esc(d.events.length + ": " + d.events.join("; ")) : `<span class="ok">none</span>`}</td></tr>`).join("")}
+        </tbody></table></div>`
+      : `<div class="empty">No drives of this car lasting 5 minutes or more yet.${all ? "" : " Tick the box above to include shorter ones."}</div>`}`;
+    document.getElementById("all").onchange = e => {
+      all = e.target.checked;
+      history.replaceState(null, "", all ? "?all=1" : location.pathname);
+      load();
+    };
+    $main.querySelectorAll("tbody tr").forEach(tr => tr.onclick = e => {
+      if (e.target.tagName !== "A") location.href = `/drive/${tr.dataset.id}`;
+    });
+  }
+  await load();
 }
 
 // ---------- one drive ----------
@@ -212,6 +323,7 @@ async function drivePage(id) {
   const first = await fetch(`/api/drives/${id}`);
   if (!first.ok) { $main.innerHTML = `<div class="empty">${esc(await first.text())}</div>`; return; }
   let data = await first.json();
+  showVersion(data.version);
   if (data.session.live) {
     es = new EventSource(`/api/drives/${id}/live`);
     const buffer = e => pending.push(...JSON.parse(e.data));
@@ -247,8 +359,9 @@ async function drivePage(id) {
   $main.innerHTML = `
     <div class="head">
       <div>
-        <h1>${esc(title)} ${sess.drive_type ? `<span class="chip">${esc(sess.drive_type)}</span>` : ""}</h1>
+        <h1><a href="/vehicle/${encodeURIComponent(sess.vin)}" title="Trends across this car's drives">${esc(title)}</a> ${sess.drive_type ? `<span class="chip">${esc(sess.drive_type)}</span>` : ""}</h1>
         <div class="sub">${esc(fmtDate(sess.started_at))} · VIN ${esc(sess.vin)}${sess.protocol ? " · " + esc(sess.protocol) : ""}</div>
+        <div class="sub">${sess.logged_by ? `Logged by <b>${esc(loggedBy(sess))}</b>` : `<span class="muted">Logger version not recorded (drives logged before carsight v0.1.2)</span>`}${sess.adapter ? ` · adapter ${esc(sess.adapter)}` : ""}</div>
         ${sess.notes ? `<div class="sub">${esc(sess.notes)}</div>` : ""}
       </div>
       <span class="badge" id="badge"><span class="dot"></span><span id="badgeText"></span></span>
@@ -261,6 +374,9 @@ async function drivePage(id) {
       </span>
       <button class="btn" id="reset" hidden>Reset zoom</button>
       <span class="muted" id="hint"></span>
+      <span class="spacer"></span>
+      <a class="btn" href="/api/drives/${id}/samples.csv" download title="Every reading at full resolution">Download samples (CSV)</a>
+      <a class="btn" href="/api/drives/${id}/analysis" target="_blank" title="The analysis as JSON">Analysis (JSON)</a>
     </div>
     <div class="grid" id="grid">${S.pids.map(p => `
       <div class="card" data-pid="${p.name}">
@@ -312,9 +428,11 @@ async function drivePage(id) {
     panels.push(mon(st.readiness, "Readiness monitors (since codes cleared)"));
     panels.push(mon((en || st).monitors_this_drive_cycle, "Monitors this drive cycle"));
 
-    const ff = st.freeze_frame;
-    if (ff) panels.push(`<div class="panel"><h3>Freeze frame · <span class="dtc"><span class="warn">${esc(ff.dtc)}</span></span></h3>${kv(Object.keys(ff.values).sort().map(k =>
-      [esc(k), ff.labels && ff.labels[k] ? esc(ff.labels[k]) : `${fmtVal(ff.values[k])} <span class="muted">${esc(unit(k))}</span>`]))}</div>`);
+    const ffPanel = (ff, when) => `<div class="panel"><h3>Freeze frame${when} · <span class="dtc"><span class="warn">${esc(ff.dtc)}</span></span></h3>${kv(Object.keys(ff.values).sort().map(k =>
+      [esc(k), ff.labels && ff.labels[k] ? esc(ff.labels[k]) : `${fmtVal(ff.values[k])} <span class="muted">${esc(unit(k))}</span>`]))}</div>`;
+    if (st.freeze_frame) panels.push(ffPanel(st.freeze_frame, ""));
+    // A new fault during the drive replaces the freeze frame.
+    if (en && en.freeze_frame && JSON.stringify(en.freeze_frame) !== JSON.stringify(st.freeze_frame)) panels.push(ffPanel(en.freeze_frame, " at the end"));
 
     // Misfires this drive cycle: the latest snapshot that has the monitor.
     const tests = ((en && en.monitor_tests) || st.monitor_tests || []);
@@ -328,9 +446,14 @@ async function drivePage(id) {
     }
     if (tests.length) {
       const failed = tests.filter(t => !t.pass);
-      panels.push(`<div class="panel"><h3>On-board monitor tests</h3>
+      panels.push(`<div class="panel wide"><h3>On-board monitor tests (mode 06)</h3>
         <div class="${failed.length ? "bad" : "ok"}">${tests.length} results, ${failed.length} failed</div>
-        ${failed.map(t => `<div class="bad">${esc(t.monitor)} ${esc(t.test)}: ${t.value} (limits ${t.min}–${t.max} ${esc(t.unit)})</div>`).join("")}</div>`);
+        <details ${failed.length ? "open" : ""}><summary>Every result</summary><div class="table-wrap"><table>
+          <thead><tr><th>Monitor</th><th>Test</th><th class="num">Value</th><th class="num">Limits</th><th></th></tr></thead><tbody>
+          ${[...failed, ...tests.filter(t => t.pass)].map(t => `<tr><td>${esc(t.monitor)}</td><td>${esc(t.test)}</td>
+            <td class="num">${fmtVal(t.value)} <span class="muted">${esc(t.unit)}</span></td><td class="num">${fmtVal(t.min)}–${fmtVal(t.max)}</td>
+            <td><span class="${t.pass ? "ok" : "bad"}">${t.pass ? "pass" : "fail"}</span></td></tr>`).join("")}
+        </tbody></table></div></details></div>`);
     }
 
     const keys = [...new Set([...Object.keys(st.values), ...Object.keys((en || {}).values || {})])].sort();
@@ -405,6 +528,14 @@ async function drivePage(id) {
       ["Voltage running", st(d.voltage_running, "V")],
       ["Upstream O2, warm", st(d.o2_b1s1_warm, "V")],
     ])}</div>`);
+
+    const pidStats = Object.entries(d.pids).sort(([x], [y]) => x.localeCompare(y));
+    if (pidStats.length) panels.push(`<div class="panel wide"><h3>Every reading</h3><details><summary>${pidStats.length} readings: count, min, mean, max</summary>
+      <div class="table-wrap"><table><thead><tr><th>Reading</th><th class="num">Samples</th><th class="num">Min</th><th class="num">Mean</th><th class="num">Max</th><th class="num">Std dev</th></tr></thead><tbody>
+      ${pidStats.map(([k, x]) => { const p = pidByName[k] || {}, u = p.unit ? ` <span class="muted">${esc(p.unit)}</span>` : "";
+        return `<tr><td title="${esc(k)}">${esc(p.desc || k)}</td><td class="num">${x.n}</td><td class="num">${fmtVal(x.min)}${u}</td>
+        <td class="num">${fmtVal(x.mean)}${u}</td><td class="num">${fmtVal(x.max)}${u}</td><td class="num">${fmtVal(x.std)}</td></tr>`; }).join("")}
+      </tbody></table></div></details></div>`);
 
     const desc = a.metric_descriptions || {};
     const base = a.baseline_deltas;
@@ -593,7 +724,9 @@ async function drivePage(id) {
     // Headline value: at the cursor, else the latest reading.
     const v = S.cursor != null ? valueAt(s, S.cursor) : s.v[s.v.length - 1];
     const p = pidByName[card.pid];
-    card.val.textContent = p.labels && v != null && p.labels[v] ? p.labels[v] : fmtVal(v);
+    const named = !!(p.labels && v != null && p.labels[v]);
+    card.val.textContent = named ? p.labels[v] : fmtVal(v);
+    card.val.classList.toggle("label", named);
   }
 
   let raf = 0;
