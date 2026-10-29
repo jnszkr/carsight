@@ -2,6 +2,60 @@
 
 Read live data from our cars over OBD-II, store it, and use AI to analyse it: spot anomalies, track engine health over time, and explain fault codes in plain language.
 
+![A drive in the carsight dashboard: trouble codes, findings, warm-up and idle figures](docs/screenshots/drive-analysis.png)
+
+## What it does
+
+- **Logs every standard OBD-II reading the car supports** through a USB ELM327 adapter, one session per drive, into a local SQLite database.
+- **Reads the car's own diagnostics** at the start and end of each drive: trouble codes (stored, pending, permanent), the freeze frame, readiness monitors, ECU calibration IDs and on-board test results such as misfires per cylinder.
+- **Analyses each drive**: warm-up, warm idle, fuel trims, charging voltage, O2 activity, rule-based findings, and a comparison with the same car's earlier drives.
+- **Shows it all in a local dashboard**: live charts while you drive, replay of saved drives, the analysis, and trends per car.
+- **Lets an AI assistant do the diagnosis** over [MCP](https://modelcontextprotocol.io): Claude (or any MCP client) can start and stop drives, read the analysis, pull raw samples and explain what it means.
+- **Records which carsight version and adapter logged each drive**, so you can tell which software collected the data.
+
+## Screenshots
+
+All taken from real drives of the two cars below (the Volvo's VIN is masked).
+
+| | |
+|---|---|
+| **Drives and vehicles.** Every logged drive, its type, notes and the carsight version that logged it. ![Drive list](docs/screenshots/drives.png) | **Trends per car.** Key figures across drives (coolant, idle RPM and stability, airflow, fuel trims, voltage) with the change per drive. ![Trends across drives](docs/screenshots/trends.png) |
+| **Every reading, charted.** A 7½-minute Volvo drive polled at 11 readings a second. Drag to zoom; the crosshair is shared across charts. ![Charts of a drive](docs/screenshots/drive-charts.png) | **What the car reported.** Vehicle and ECU information, readiness monitors, the freeze frame stored with a fault code, and every value at the start and end. ![Snapshot panels](docs/screenshots/snapshot.png) |
+
+## Quick start
+
+1. **Install** (Go 1.27+):
+
+   ```bash
+   go install github.com/jnszkr/carsight/cmd/carsight@latest
+   carsight version
+   ```
+
+2. **Connect**: plug the ELM327 adapter into the laptop and the car's OBD-II port, turn the ignition on, and check the link:
+
+   ```bash
+   carsight scan
+   ```
+
+   No car nearby? Add `-port sim:volvo` (or `sim:citroen`) to any car command to use the built-in simulator.
+
+3. **Log a drive**: start the engine, then
+
+   ```bash
+   carsight log -name "Volvo V70" -type commute
+   ```
+
+   It prints a dashboard link with live charts. Press Ctrl-C at the end of the drive.
+
+4. **Look at it**:
+
+   ```bash
+   carsight dashboard     # http://127.0.0.1:7341: drives, analysis, trends
+   carsight report        # Markdown report on the latest drive
+   ```
+
+5. **Ask an AI about it**: add carsight to Claude ([below](#add-carsight-to-claude)) and ask "how did my last drive go?". Claude can also start and stop the logging for you.
+
 ## Goals
 
 1. **Log** live engine data from the OBD-II port to local storage while driving.
@@ -64,7 +118,8 @@ SQLite (~/Library/Application Support/carsight/carsight.db)
       ├── carsight report / trend / summary   ── Markdown or JSON on the command line
       │
       ├── dashboard (http://127.0.0.1:7341)    ── live charts of the drive being logged,
-      │                                           replay of stored drives
+      │                                           stored drives with their analysis,
+      │                                           trends per car, CSV downloads
       │
       └── carsight mcp    ── MCP server (stdio): any AI assistant scans the car,
                              starts and stops drives, and queries summaries,
@@ -116,7 +171,18 @@ No car handy? `-port sim:volvo` or `-port sim:citroen` runs against a simulated 
 
 ### Dashboard
 
-A local web page charts every logged PID. `carsight log` and the MCP `start_drive` tool start it with the drive and give its link (`http://127.0.0.1:7341/drive/<session>`). While the drive is being logged, the page streams readings as they arrive (server-sent events), with a 1/5/15-minute or whole-drive window. Stored drives open from the list at `/`. Drag across a chart to zoom and double-click to reset; the crosshair is synced across all charts. Below the charts, the snapshot panels show the vehicle and ECU information, readiness monitors, the freeze frame, misfires by cylinder, failed on-board tests, and every value at the start and end of the drive.
+A local web page shows everything carsight stores. `carsight log` and the MCP `start_drive` tool start it with the drive and give its link (`http://127.0.0.1:7341/drive/<session>`).
+
+- **Drives** (`/`): every car with a link to its trends, and every drive with its type, notes and the carsight version that logged it.
+- **A drive** (`/drive/<session>`):
+  - the trouble codes, which carsight version and adapter logged it
+  - **the analysis** once the drive is saved: findings (click a timed one to zoom the charts to it), warm-up, warm idle, fuel trims, voltage and O2, statistics for every reading, and each key figure against the car's earlier drives
+  - a chart for every logged reading. While the drive is being logged the charts stream readings as they arrive (server-sent events), with a 1/5/15-minute or whole-drive window. Drag across a chart to zoom and double-click to reset; the crosshair is synced across all charts.
+  - the snapshot panels: vehicle and ECU information, readiness monitors, the freeze frame (and a new one if a fault was stored during the drive), misfires by cylinder, every on-board test result, and every value at the start and end of the drive
+  - **downloads**: every sample at full resolution as CSV, and the analysis as JSON
+- **A car's trends** (`/vehicle/<VIN>`): each key figure across the car's drives with its change per drive (and per 30 days once the drives span a few days), plus a table of drives and their findings. Drives under 5 minutes are left out unless you tick the box (or add `?all=1`).
+
+The top-right corner shows the carsight version serving the page.
 
 `carsight log` stops its dashboard when it exits at the end of the drive, so use `carsight dashboard` to look at the drive afterwards. The MCP server keeps its dashboard running.
 
@@ -136,13 +202,19 @@ A drive report has rule-based findings (overheating, slow warm-up, unstable idle
 
 ### AI analysis over MCP
 
-`carsight mcp` runs an [MCP](https://modelcontextprotocol.io) server on stdio. The assistant can analyse logged drives and also drive the adapter: scan the car, start and stop logging, and label drives. Register it with your assistant, for example in Claude Code:
+`carsight mcp` runs an [MCP](https://modelcontextprotocol.io) server on stdio. The assistant can analyse logged drives and also drive the adapter: scan the car, start and stop logging, and label drives.
+
+#### Add carsight to Claude
+
+**Claude Code** (the CLI, the desktop app's Code tab, and the IDE extensions):
 
 ```bash
-claude mcp add carsight -- carsight mcp
+claude mcp add --scope user carsight -- "$(go env GOPATH)/bin/carsight" mcp
 ```
 
-or in an MCP client's JSON config (Claude Desktop, Cursor, …):
+`--scope user` makes carsight available in every project, not only the current directory. Check it with `claude mcp list`, or `/mcp` inside a session.
+
+**Claude Desktop**: open Settings → Developer → Edit Config, which opens `~/Library/Application Support/Claude/claude_desktop_config.json`, and add:
 
 ```json
 {
@@ -152,7 +224,23 @@ or in an MCP client's JSON config (Claude Desktop, Cursor, …):
 }
 ```
 
-Claude Desktop doesn't use your shell's `PATH`, so give the binary's full path there. `carsight mcp` takes the same `-port`, `-baud`, `-sim-speedup` and `-dashboard` flags as `carsight log` to set the default adapter and the dashboard's address.
+Then quit and reopen Claude Desktop. Claude Desktop doesn't use your shell's `PATH`, so give the binary's full path (`echo "$(go env GOPATH)/bin/carsight"` prints it). The same JSON works for other MCP clients such as Cursor.
+
+`carsight mcp` takes the same `-port`, `-baud`, `-protocol`, `-sim-speedup`, `-db` and `-dashboard` flags as `carsight log`; add them after `mcp` to change the defaults.
+
+**Tips**
+
+- **After updating carsight, restart the MCP server** (restart the app, or `/mcp` → reconnect in Claude Code). The assistant keeps running the binary it started with; `carsight version` shows what's installed and the dashboard's header shows what's running.
+- **Try it without a car** using the simulator and a separate database, so test drives don't mix with real ones:
+
+  ```bash
+  claude mcp add carsight-sim -- "$(go env GOPATH)/bin/carsight" mcp -port sim:volvo -db /tmp/carsight-sim.db -dashboard 127.0.0.1:7342
+  ```
+
+- **One program at a time**: only one process can hold the adapter. If Claude Code and Claude Desktop both run carsight, start drives from one of them, and close FORScan or other OBD apps.
+- **Keep the laptop awake while logging**: a sleeping laptop stops the drive. On macOS, `caffeinate -i` in a terminal keeps it awake.
+- **Tell it what kind of drive it is** ("cold start", "highway"): drive types let trends compare like with like.
+- **Ask for the dashboard**: "open the dashboard for that drive" gives you the link with charts and the analysis.
 
 Then ask things like "start logging, it's a cold-start commute", "what's the coolant temperature now?", "stop logging and tell me how the drive went" or "are the Volvo's fuel trims drifting on highway drives?".
 
@@ -198,7 +286,8 @@ Good analysis depends on baselines: record several consistent drives per car (sa
 | `internal/store` | SQLite schema and queries |
 | `internal/analyze` | Drive summary, events, baseline comparison, trends, Markdown reports |
 | `internal/mcpserver` | MCP tools (car control and data) and prompts |
-| `internal/dashboard` | Local web dashboard: live drive over server-sent events, replay of stored drives |
+| `internal/dashboard` | Local web dashboard: live drive over server-sent events, stored drives with their analysis, trends per car |
+| `internal/buildinfo` | The running carsight version, recorded on every drive |
 
 ## What carsight collects
 
@@ -226,6 +315,8 @@ Slow and extra PIDs are spread a few per cycle, so no cycle stalls on a long bat
 
 Stored and pending DTCs are also read at the start and end.
 
+**About the drive itself.** The carsight version that logged it (`logged_by` in `list_sessions` and the drive summary) and the adapter's description, e.g. `vLinker FS v2.2.58 … (ELM327 v2.2)`. Drives logged before v0.1.2 don't have these.
+
 The drive summary turns these into events: misfires by cylinder, failed monitor tests, permanent codes, a freeze frame, a fuel system fault, and codes cleared recently (under 100 km or 5 warm-ups ago, when readiness and stored codes may not show the whole picture).
 
 **Not collected.** Manufacturer-specific data (transmission temperature, ABS, airbag, body modules, per-cylinder timing) needs brand-specific commands such as FORScan's and isn't standard OBD-II. Mode 06 on pre-CAN cars uses a different format and is skipped.
@@ -244,6 +335,7 @@ Implemented and tested against the built-in simulator; not yet verified on the r
 - [x] Baseline per car + trend comparison across drives
 - [x] Local web dashboard: live drive over server-sent events, replay of stored drives
 - [x] Every standard PID the car supports, polled by rate; start/end snapshots with freeze frame, permanent DTCs, mode 09 vehicle info and mode 06 monitor tests
+- [x] Dashboard shows the analysis, trends per car and the carsight version that logged each drive
 
 Next:
 
