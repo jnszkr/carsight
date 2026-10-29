@@ -57,6 +57,24 @@ func TestInit(t *testing.T) {
 	}
 }
 
+// Opening the serial port can reset the adapter, which prints its banner,
+// and the port probe's bare CR gets a "?" of its own. Neither reply may be
+// taken for ATZ's.
+func TestInitSkipsRepliesAlreadyWaiting(t *testing.T) {
+	s := &scripted{replies: map[string]string{
+		"": "?", "ATZ": "ATZ\r\r\rELM327 v2.3", "ATE0": "OK", "ATL0": "OK", "ATS0": "OK", "ATH0": "OK",
+		"ATAT1": "OK", "ATSP5": "OK", "0100": "BUS INIT: OK\r4100983B4011", "ATDPN": "5",
+	}}
+	s.out.WriteString("\r\rELM327 v2.3\r\r>\r?\r\r>")
+	c := New(s)
+	if err := c.Init(context.Background(), 5); err != nil {
+		t.Fatal(err)
+	}
+	if c.Protocol != 5 || c.Version != "ELM327 v2.3" {
+		t.Errorf("protocol = %v, version = %q", c.Protocol, c.Version)
+	}
+}
+
 // slow holds back the reply to one command, like a K-line bus handshake.
 type slow struct {
 	*scripted

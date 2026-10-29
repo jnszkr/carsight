@@ -102,8 +102,14 @@ func (c *Conn) Init(ctx context.Context, p Protocol) error {
 		return fmt.Errorf("elm327: unknown protocol %d (want 0-9)", p)
 	}
 	// A stray partial command may be sitting in the adapter's buffer; a bare
-	// CR flushes it and gets us a prompt.
+	// CR flushes it and gets us a prompt. Replies may already be waiting too:
+	// opening the port can reset the adapter, which prints its banner, and the
+	// port probe's CR gets an answer of its own. Discard everything until the
+	// line goes quiet, or each reply would be taken for the next command's.
 	_, _ = c.Command(ctx, "")
+	if err := c.drain(ctx); err != nil {
+		return fmt.Errorf("reset: %w", err)
+	}
 	ver, err := c.Command(ctx, "ATZ")
 	if err != nil {
 		return fmt.Errorf("reset: %w", err)
@@ -191,6 +197,35 @@ func (c *Conn) command(ctx context.Context, cmd string, timeout time.Duration) (
 		return nil, err
 	}
 	return parseLines(cmd, raw)
+}
+
+// drainQuiet is how long the adapter must stay silent for drain to finish.
+const drainQuiet = 300 * time.Millisecond
+
+// drain discards input until nothing has arrived for drainQuiet, giving up
+// if the adapter is still talking a command timeout later.
+func (c *Conn) drain(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	deadline := time.Now().Add(drainQuiet + c.timeout)
+	last := time.Now()
+	for time.Since(last) < drainQuiet {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return ErrTimeout
+		}
+		if _, err := c.r.ReadByte(); err == io.EOF {
+			time.Sleep(time.Millisecond)
+		} else if err != nil {
+			return fmt.Errorf("elm327: read: %w", err)
+		} else {
+			last = time.Now()
+		}
+	}
+	c.unsynced = false
+	return nil
 }
 
 func (c *Conn) readUntilPrompt(ctx context.Context, timeout time.Duration) ([]byte, error) {
