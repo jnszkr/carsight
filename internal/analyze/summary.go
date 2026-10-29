@@ -39,6 +39,8 @@ type Summary struct {
 	Protocol    string             `json:"protocol,omitempty"`
 	DriveType   string             `json:"drive_type,omitempty"`
 	Notes       string             `json:"notes,omitempty"`
+	Software    string             `json:"logged_by,omitempty"` // carsight version that logged the drive
+	Adapter     string             `json:"adapter,omitempty"`
 	Start       time.Time          `json:"start"`
 	Duration    Duration           `json:"duration"`
 	DistanceKm  float64            `json:"distance_km"`
@@ -115,7 +117,7 @@ type DTCEntry struct {
 func Summarize(sess store.Session, veh store.Vehicle, samples []store.Sample, dtcs []store.DTC) Summary {
 	sum := Summary{
 		SessionID: sess.ID, VIN: sess.VIN, Vehicle: veh.Name, Protocol: sess.Protocol, DriveType: sess.DriveType, Notes: sess.Notes,
-		Start: sess.StartedAt, SampleCount: len(samples), PIDs: map[string]Stats{}, Events: []Event{},
+		Software: sess.Software, Adapter: sess.Adapter, Start: sess.StartedAt, SampleCount: len(samples), PIDs: map[string]Stats{}, Events: []Event{},
 		DTCs: []DTCEntry{}, Metrics: map[string]float64{},
 	}
 	end := sess.EndedAt

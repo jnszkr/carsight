@@ -27,7 +27,9 @@ CREATE TABLE IF NOT EXISTS sessions (
 	readiness  TEXT NOT NULL DEFAULT '',
 	notes      TEXT NOT NULL DEFAULT '',
 	drive_type TEXT NOT NULL DEFAULT '',
-	info       TEXT NOT NULL DEFAULT ''
+	info       TEXT NOT NULL DEFAULT '',
+	software   TEXT NOT NULL DEFAULT '', -- carsight version that logged it
+	adapter    TEXT NOT NULL DEFAULT ''  -- OBD adapter's description
 );
 CREATE INDEX IF NOT EXISTS sessions_vin ON sessions(vin, started_at);
 CREATE TABLE IF NOT EXISTS samples (
@@ -70,6 +72,8 @@ type Session struct {
 	DriveType string // e.g. "commute", "highway"
 	Notes     string
 	Info      string // JSON-encoded obd.SessionInfo: snapshots at start and end
+	Software  string // carsight version that logged the drive; empty before v0.1.2
+	Adapter   string // OBD adapter, as it described itself
 }
 
 // Sample is one PID reading.
@@ -106,7 +110,7 @@ func migrate(db *sql.DB) error {
 	if _, err := db.Exec(schema); err != nil {
 		return err
 	}
-	for _, col := range []string{"drive_type", "info"} {
+	for _, col := range []string{"drive_type", "info", "software", "adapter"} {
 		var n int
 		if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('sessions') WHERE name = ?`, col).Scan(&n); err != nil {
 			return err
@@ -191,6 +195,13 @@ func (s *Store) SetInfo(ctx context.Context, id int64, infoJSON string) error {
 	return err
 }
 
+// SetCollector records what logged a session: the carsight version and the
+// OBD adapter.
+func (s *Store) SetCollector(ctx context.Context, id int64, software, adapter string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET software = ?, adapter = ? WHERE id = ?`, software, adapter, id)
+	return err
+}
+
 // Describe sets a session's drive type (e.g. "commute") and free-form notes.
 func (s *Store) Describe(ctx context.Context, id int64, driveType, notes string) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE sessions SET drive_type = ?, notes = ? WHERE id = ?`, driveType, notes, id)
@@ -238,13 +249,13 @@ func (s *Store) AddDTCs(ctx context.Context, id int64, kind string, codes []stri
 	return nil
 }
 
-const sessionCols = `id, vin, started_at, ended_at, protocol, readiness, drive_type, notes, info`
+const sessionCols = `id, vin, started_at, ended_at, protocol, readiness, drive_type, notes, info, software, adapter`
 
 func scanSession(sc interface{ Scan(...any) error }) (Session, error) {
 	var ss Session
 	var start int64
 	var end sql.NullInt64
-	if err := sc.Scan(&ss.ID, &ss.VIN, &start, &end, &ss.Protocol, &ss.Readiness, &ss.DriveType, &ss.Notes, &ss.Info); err != nil {
+	if err := sc.Scan(&ss.ID, &ss.VIN, &start, &end, &ss.Protocol, &ss.Readiness, &ss.DriveType, &ss.Notes, &ss.Info, &ss.Software, &ss.Adapter); err != nil {
 		return ss, err
 	}
 	ss.StartedAt = time.UnixMilli(start)

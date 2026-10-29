@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime/debug"
 	"slices"
 	"strings"
 	"syscall"
@@ -24,6 +23,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/jnszkr/carsight/internal/analyze"
+	"github.com/jnszkr/carsight/internal/buildinfo"
 	"github.com/jnszkr/carsight/internal/car"
 	"github.com/jnszkr/carsight/internal/dashboard"
 	"github.com/jnszkr/carsight/internal/mcpserver"
@@ -81,7 +81,7 @@ func main() {
 	case "dashboard":
 		err = dashboardCmd(ctx, args)
 	case "version", "-version", "--version":
-		fmt.Println(versionLine())
+		fmt.Println(buildinfo.Line())
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
@@ -482,44 +482,11 @@ func mcpCmd(ctx context.Context, args []string) error {
 		return err
 	}
 	defer db.Close()
-	srv := mcpserver.New(db, mcpserver.Config{Version: version(), Adapter: *adapter, Dashboard: *dash})
+	srv := mcpserver.New(db, mcpserver.Config{Version: buildinfo.Version(), Adapter: *adapter, Dashboard: *dash})
 	// Ending the session (the client exits) stops and saves a drive in progress.
 	defer srv.Close()
 	// stdout carries the protocol; logs go to stderr.
 	return srv.MCP.Run(ctx, &mcp.StdioTransport{})
-}
-
-func version() string {
-	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" {
-		return bi.Main.Version
-	}
-	return "dev"
-}
-
-// versionLine is the version followed by the commit it was built from, when
-// the build recorded one: a release tag (v0.1.3) for builds of a tagged
-// commit, otherwise a pseudo-version.
-func versionLine() string {
-	line := "carsight " + version()
-	bi, ok := debug.ReadBuildInfo()
-	if !ok {
-		return line
-	}
-	vcs := map[string]string{}
-	for _, s := range bi.Settings {
-		vcs[s.Key] = s.Value
-	}
-	if rev := vcs["vcs.revision"]; len(rev) >= 7 {
-		line += " (commit " + rev[:7]
-		if t := vcs["vcs.time"]; t != "" {
-			line += ", " + t
-		}
-		if vcs["vcs.modified"] == "true" {
-			line += ", modified"
-		}
-		line += ")"
-	}
-	return line
 }
 
 // parseDay parses YYYY-MM-DD in local time; end makes it exclusive (the

@@ -48,12 +48,16 @@ func TestStore(t *testing.T) {
 	if err := s.SetReadiness(ctx, id, `{"mil":false}`); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.SetCollector(ctx, id, "v0.1.2", "ELM327 v1.5"); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.EndSession(ctx, id, t0.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 
 	ss, err := s.Session(ctx, id)
-	if err != nil || !ss.EndedAt.Equal(t0.Add(time.Minute)) || ss.Readiness != `{"mil":false}` {
+	if err != nil || !ss.EndedAt.Equal(t0.Add(time.Minute)) || ss.Readiness != `{"mil":false}` ||
+		ss.Software != "v0.1.2" || ss.Adapter != "ELM327 v1.5" {
 		t.Errorf("session %+v, %v", ss, err)
 	}
 	samples, err := s.Samples(ctx, id)

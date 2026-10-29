@@ -239,6 +239,8 @@ type sessionInfo struct {
 	Protocol  string    `json:"protocol,omitempty"`
 	DriveType string    `json:"drive_type,omitempty"`
 	Notes     string    `json:"notes,omitempty"`
+	Software  string    `json:"logged_by,omitempty"` // carsight version that logged it
+	Adapter   string    `json:"adapter,omitempty"`
 }
 
 type listSessionsOut struct {
@@ -270,7 +272,7 @@ func (s *Server) listSessions(ctx context.Context, _ *mcp.CallToolRequest, in li
 			break
 		}
 		info := sessionInfo{ID: ss.ID, VIN: ss.VIN, StartedAt: ss.StartedAt, Protocol: ss.Protocol,
-			DriveType: ss.DriveType, Notes: ss.Notes, Running: ss.EndedAt.IsZero()}
+			DriveType: ss.DriveType, Notes: ss.Notes, Software: ss.Software, Adapter: ss.Adapter, Running: ss.EndedAt.IsZero()}
 		if !ss.EndedAt.IsZero() {
 			info.Duration = math.Round(ss.EndedAt.Sub(ss.StartedAt).Seconds())
 		}

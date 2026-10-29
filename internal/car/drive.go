@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jnszkr/carsight/internal/buildinfo"
 	"github.com/jnszkr/carsight/internal/elm327"
 	"github.com/jnszkr/carsight/internal/obd"
 	"github.com/jnszkr/carsight/internal/store"
@@ -138,6 +139,9 @@ func startDrive(ctx context.Context, c *Car, db *store.Store, o DriveOptions) (*
 	start := time.Now()
 	id, err := db.StartSession(ctx, vin, c.Protocol(), start)
 	if err != nil {
+		return nil, err
+	}
+	if err := db.SetCollector(ctx, id, buildinfo.Version(), c.Desc); err != nil {
 		return nil, err
 	}
 	if o.DriveType != "" || o.Notes != "" {
