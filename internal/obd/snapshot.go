@@ -2,8 +2,10 @@ package obd
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 )
 
@@ -123,6 +125,13 @@ func (c *Client) NewSnapshot(supported map[byte]bool, vehicle bool) *SnapshotJob
 			}
 		})
 	}
+	if c.CAN && !supported[0xA6] {
+		add(func(ctx context.Context) {
+			if km, ok := c.volvoOdometer(ctx); ok {
+				s.Values["odometer"] = km
+			}
+		})
+	}
 	add(func(ctx context.Context) {
 		ff, err := c.ReadFreezeFrame(ctx)
 		if err != nil {
@@ -161,6 +170,26 @@ func (c *Client) NewSnapshot(supported map[byte]bool, vehicle bool) *SnapshotJob
 		})
 	}
 	return j
+}
+
+// volvoOdometer reads the odometer in km from a Volvo V70 (VIN prefix YV1BW),
+// which doesn't offer the standard PID A6. Identifier DD01 is Volvo's own, so
+// other cars must not be asked: it could mean something else there.
+func (c *Client) volvoOdometer(ctx context.Context) (float64, bool) {
+	vin, err := c.VIN(ctx)
+	if err != nil || !strings.HasPrefix(vin, "YV1BW") {
+		return 0, false
+	}
+	resps, err := c.R.Request(ctx, "22DD01")
+	if err != nil {
+		return 0, false
+	}
+	for _, r := range resps {
+		if len(r) >= 7 && r[0] == 0x62 && r[1] == 0xDD && r[2] == 0x01 {
+			return float64(binary.BigEndian.Uint32(r[3:7])), true
+		}
+	}
+	return 0, false
 }
 
 // Step runs the next request (or small batch) and reports whether any

@@ -100,7 +100,7 @@ Sold as "Made for FORScan", but it is a general OBD-II adapter that speaks the E
 
 | Car | Year | Notes |
 |---|---|---|
-| Volvo V70 | 2011 | P3 platform (Ford-related). Rich standard PID set. Extra modules on MS-CAN, which the vLinker FS can reach. |
+| Volvo V70 | 2011 | P3 platform (Ford-related). Rich standard PID set, without an odometer, so start and end snapshots read it from the engine module's Volvo identifier `DD01`. Extra modules on MS-CAN, which the vLinker FS can reach. |
 | Citroën C4 | 2006 | PSA diesel (HDi). KWP2000 fast init on the K-line (pin 7) to the Bosch engine ECU; 12 standard PIDs, about 0.6 polling cycles a second. No VIN over OBD, so drives are filed under the engine's calibration ID (`CALID-…`). The OBD socket's CAN pins carry the car's internal bus, which doesn't answer OBD requests. PSA-specific modules are out of scope for v1. |
 
 ## Architecture
