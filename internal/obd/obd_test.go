@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/jnszkr/carsight/internal/elm327"
@@ -220,5 +221,58 @@ func TestFreezeFrame(t *testing.T) {
 	none := &Client{R: fakeReq{"020200": {{0x42, 0x02, 0x00, 0x00, 0x00}}}}
 	if ff, err := none.ReadFreezeFrame(context.Background()); ff != nil || err != nil {
 		t.Errorf("no frame: %+v %v", ff, err)
+	}
+}
+
+type recordReq struct {
+	fakeReq
+	reqs []string
+}
+
+func (r *recordReq) Request(ctx context.Context, req string) ([][]byte, error) {
+	r.reqs = append(r.reqs, req)
+	return r.fakeReq.Request(ctx, req)
+}
+
+func TestVolvoOdometer(t *testing.T) {
+	vin := func(v string) [][]byte { return [][]byte{append([]byte{0x49, 0x02, 0x01}, v...)} }
+	dd01 := [][]byte{{0x62, 0xDD, 0x01, 0x00, 0x05, 0x67, 0xE1}}
+	tests := []struct {
+		name      string
+		can       bool
+		vin       string
+		supported map[byte]bool
+		reply     [][]byte
+		want      float64 // 0 means no odometer value
+		asked     bool
+	}{
+		{name: "V70 reads DD01", can: true, vin: "YV1BW84B1B1234567", reply: dd01, want: 354273, asked: true},
+		{name: "V70 that refuses DD01", can: true, vin: "YV1BW84B1B1234567", asked: true},
+		{name: "wrong identifier in reply", can: true, vin: "YV1BW84B1B1234567",
+			reply: [][]byte{{0x62, 0xDD, 0x00, 0x00, 0x05, 0x67, 0xE1}}, asked: true},
+		{name: "short reply", can: true, vin: "YV1BW84B1B1234567",
+			reply: [][]byte{{0x62, 0xDD, 0x01, 0x00, 0x05}}, asked: true},
+		{name: "another Volvo model", can: true, vin: "YV1MS1234B1234567", reply: dd01},
+		{name: "another make", can: true, vin: "VF7LC9HZC12345678", reply: dd01},
+		{name: "not CAN", vin: "YV1BW84B1B1234567", reply: dd01},
+		{name: "standard odometer wins", can: true, vin: "YV1BW84B1B1234567", reply: dd01,
+			supported: map[byte]bool{0xA6: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := fakeReq{"0902": vin(tt.vin)}
+			if tt.reply != nil {
+				f["22DD01"] = tt.reply
+			}
+			r := &recordReq{fakeReq: f}
+			c := &Client{R: r, CAN: tt.can}
+			s := c.TakeSnapshot(context.Background(), tt.supported, false)
+			if got := s.Values["odometer"]; got != tt.want {
+				t.Errorf("odometer = %v, want %v", got, tt.want)
+			}
+			if asked := slices.Contains(r.reqs, "22DD01"); asked != tt.asked {
+				t.Errorf("asked for DD01 = %v, want %v (requests %v)", asked, tt.asked, r.reqs)
+			}
+		})
 	}
 }

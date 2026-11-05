@@ -75,3 +75,20 @@ func TestExplicitProtocol(t *testing.T) {
 		}
 	}
 }
+
+func TestVolvoOdometerSnapshot(t *testing.T) {
+	ctx := context.Background()
+	car := Volvo()
+	conn := elm327.New(New(car))
+	if err := conn.Init(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+	c := &obd.Client{R: conn, CAN: car.CAN}
+	sup, err := c.SupportedPIDs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.TakeSnapshot(ctx, sup, false).Values["odometer"]; got != float64(car.OdometerKm) {
+		t.Errorf("odometer = %v, want %v", got, car.OdometerKm)
+	}
+}

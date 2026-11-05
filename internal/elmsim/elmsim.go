@@ -4,6 +4,7 @@ package elmsim
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"math"
@@ -31,6 +32,8 @@ type Car struct {
 	AmbientC    float64
 	LTFT        float64 // long-term fuel trim offset in %, to simulate a lean/rich engine
 	CoolantMaxC float64 // steady-state coolant temperature; ~90 for a healthy thermostat
+	// OdometerKm answers Volvo's identifier DD01 when set.
+	OdometerKm uint32
 	// Speedup makes simulated time run faster than wall-clock time.
 	Speedup float64
 	// Latency is how long each OBD request takes to answer, like a real
@@ -49,7 +52,7 @@ func Volvo() Car {
 		PIDs: []byte{0x01, 0x03, 0x04, 0x05, 0x06, 0x07, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x13, 0x14, 0x15, 0x1C, 0x1F, 0x20,
 			0x21, 0x2F, 0x30, 0x31, 0x33, 0x3C, 0x40, 0x41, 0x42, 0x43, 0x44, 0x46, 0x49, 0x4C, 0x51},
 		Misfires: map[int]float64{3: 1.5}, Cylinders: 5,
-		AmbientC: 12, CoolantMaxC: 90, Speedup: 1, Latency: 30 * time.Millisecond,
+		AmbientC: 12, CoolantMaxC: 90, OdometerKm: 123456, Speedup: 1, Latency: 30 * time.Millisecond,
 	}
 }
 
@@ -170,6 +173,8 @@ func (a *Adapter) handle(cmd string) string {
 		return a.hex([]byte{0x44})
 	case cmd == "0902":
 		return a.vinResponse()
+	case cmd == "22DD01" && a.car.OdometerKm > 0:
+		return a.hex(binary.BigEndian.AppendUint32([]byte{0x62, 0xDD, 0x01}, a.car.OdometerKm))
 	case strings.HasPrefix(cmd, "09") && len(cmd) == 4:
 		return a.mode09(cmd[2:])
 	case strings.HasPrefix(cmd, "06") && len(cmd) == 4 && a.car.CAN:
